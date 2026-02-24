@@ -538,9 +538,10 @@ class ContractService:
                         if cur.fetchone():
                             return {"success": False, "error": f"合同编号 {new_contract_no} 已被使用"}
 
-                    # 处理图片重命名
-                    new_image_path = old_image_path
-                    if new_contract_no and new_contract_no != old_contract_no and old_image_path:
+                    # 处理图片重命名（如果合同编号变更且存在旧图片）
+                    new_image_path = data.get("contract_image_path")  # 可能传入新图片路径
+                    if new_contract_no and new_contract_no != old_contract_no and old_image_path and not new_image_path:
+                        # 只有合同号变更但没有传入新图片时，重命名旧图片
                         old_path = Path(old_image_path)
                         if old_path.exists():
                             # 生成新文件名
@@ -556,6 +557,9 @@ class ContractService:
                             os.rename(old_path, new_path)
                             new_image_path = str(new_path)
                             data["contract_image_path"] = new_image_path
+                    elif new_image_path:
+                        # 传入了新图片路径，直接使用（路由层已处理文件保存和旧文件删除）
+                        pass
 
                     # 构建更新SQL
                     update_fields = []
