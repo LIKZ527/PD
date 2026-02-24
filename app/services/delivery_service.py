@@ -85,7 +85,7 @@ class DeliveryService:
             logger.error(f"计算价格失败: {e}")
             return None, None, None
 
-    def create_delivery(self, data: Dict, image_file: bytes = None, current_user: str = "system") -> Dict[str, Any]:
+    def create_delivery(self, data: Dict, image_file: bytes = None, current_user: dict = None) -> Dict[str, Any]:
         """创建报货订单"""
         image_path = None
         temp_file_path = None
@@ -97,8 +97,15 @@ class DeliveryService:
             source_type = self._determine_source_type(has_order, uploaded_by)
             data['source_type'] = source_type
 
+            # 处理操作人信息
+            uploader_id = None
+            uploader_name = "system"
+            if current_user:
+                uploader_id = current_user.get("id")
+                uploader_name = current_user.get("name") or current_user.get("account") or "system"
+
             if not data.get('shipper'):
-                data['shipper'] = current_user
+                data['shipper'] = uploader_name
 
             # 计算价格
             contract_no = None
@@ -132,8 +139,9 @@ class DeliveryService:
                         (report_date, warehouse, target_factory_id, target_factory_name,
                          product_name, quantity, vehicle_no, driver_name, driver_phone, driver_id_card,
                          has_delivery_order, delivery_order_image, source_type,
-                         shipper, payee, service_fee, contract_no, contract_unit_price, total_amount, status)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         shipper, payee, service_fee, contract_no, contract_unit_price, total_amount, status,
+                         uploader_id, uploader_name, uploaded_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     """, (
                         data.get('report_date'),
                         data.get('warehouse'),
@@ -154,7 +162,9 @@ class DeliveryService:
                         contract_no,
                         unit_price,
                         total_amount,
-                        data.get('status', '待确认')
+                        data.get('status', '待确认'),
+                        uploader_id,
+                        uploader_name,
                     ))
 
                     delivery_id = cur.lastrowid
@@ -170,7 +180,9 @@ class DeliveryService:
                             "contract_no": contract_no,
                             "contract_unit_price": unit_price,
                             "total_amount": total_amount,
-                            "source_type": source_type
+                            "source_type": source_type,
+                            "uploader_id": uploader_id,
+                            "uploader_name": uploader_name,
                         }
                     }
 
@@ -299,7 +311,7 @@ class DeliveryService:
                     columns = [desc[0] for desc in cur.description]
                     data = dict(zip(columns, row))
 
-                    for key in ['report_date', 'created_at', 'updated_at']:
+                    for key in ['report_date', 'created_at', 'updated_at', 'uploaded_at']:  # 新增 uploaded_at
                         if data.get(key):
                             data[key] = str(data[key])
 
@@ -392,7 +404,7 @@ class DeliveryService:
                     data = []
                     for row in rows:
                         item = dict(zip(columns, row))
-                        for key in ['report_date', 'created_at', 'updated_at']:
+                        for key in ['report_date', 'created_at', 'updated_at', 'uploaded_at']:  # 新增 uploaded_at
                             if item.get(key):
                                 item[key] = str(item[key])
                         item["delivery_order_upload_status"] = self._get_upload_status(

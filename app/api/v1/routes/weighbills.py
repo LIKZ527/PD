@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 from app.services.balance_service import BalanceService, get_balance_service
 from app.services.contract_service import get_conn
 from app.services.weighbill_service import WeighbillService, get_weighbill_service
+from core.auth import get_current_user  # 添加认证依赖导入
 
 router = APIRouter(prefix="/weighbills", tags=["磅单管理"])
 
@@ -119,6 +120,9 @@ class WeighbillOut(BaseModel):
     weighbill_image: Optional[str] = None
     ocr_status: str = "待确认"
     is_manual_corrected: int = 0
+    uploader_id: Optional[int] = None  # 新增
+    uploader_name: Optional[str] = None  # 新增
+    uploaded_at: Optional[str] = None  # 新增
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -189,7 +193,8 @@ async def create_weighbill(
     request_json: Optional[str] = Form(None, description="磅单数据JSON字符串"),
     weighbill_image: Optional[UploadFile] = File(None, description="磅单图片（可选，OCR时已传则不用）"),
     is_manual: bool = Form(True, description="是否人工录入/修正"),
-    service: WeighbillService = Depends(get_weighbill_service)
+    service: WeighbillService = Depends(get_weighbill_service),
+    current_user: dict = Depends(get_current_user)  # 添加认证依赖获取当前用户
 ):
     """
     保存磅单（OCR后确认保存，或纯手动录入）
@@ -231,59 +236,8 @@ async def create_weighbill(
 
             image_path = str(file_path)
 
-        # 保存到数据库
-        result = service.create_weighbill(data, image_path, is_manual)
-
-        if result["success"]:
-            return result
-        else:
-            raise HTTPException(status_code=400, detail=result.get("error"))
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/{bill_id}", response_model=WeighbillOut)
-async def get_weighbill(
-        bill_id: int,
-        service: WeighbillService = Depends(get_weighbill_service)
-):
-    """查看磅单详情"""
-    bill = service.get_weighbill(bill_id)
-    if not bill:
-        raise HTTPException(status_code=404, detail="磅单不存在")
-    return bill
-
-
-@router.put("/{bill_id}", response_model=dict)
-async def update_weighbill(
-        bill_id: int,
-        request: WeighbillUpdateRequest = Body(...),
-        service: WeighbillService = Depends(get_weighbill_service)
-):
-    """
-    编辑/修正磅单
-
-    用于：
-    - OCR识别错误时人工修正
-    - 补充缺失信息
-    - 修改关联关系
-    """
-    try:
-        data = {k: v for k, v in request.dict().items() if v is not None}
-
-        # 重新计算总价
-        if "unit_price" in data or "net_weight" in data:
-            # 获取现有数据
-            existing = service.get_weighbill(bill_id)
-            unit_price = data.get("unit_price", existing.get("unit_price"))
-            net_weight = data.get("net_weight", existing.get("net_weight"))
-            if unit_price and net_weight:
-                data["total_amount"] = round(unit_price * net_weight, 2)
-
-        result = service.update_weighbill(bill_id, data)
+        # 保存到数据库，传递当前用户
+        result = service.create_weighbill(data, image_path, is_manual, current_user)
 
         if result["success"]:
             return result

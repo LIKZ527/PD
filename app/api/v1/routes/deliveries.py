@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.services.delivery_service import DeliveryService, get_delivery_service
+from core.auth import get_current_user  # 添加认证依赖导入
 
 router = APIRouter(prefix="/deliveries", tags=["销售台账/报货订单"])
 
@@ -76,6 +77,9 @@ class DeliveryOut(BaseModel):
     contract_unit_price: Optional[float] = None
     total_amount: Optional[float] = None
     status: Optional[str] = None
+    uploader_id: Optional[int] = None  # 新增
+    uploader_name: Optional[str] = None  # 新增
+    uploaded_at: Optional[str] = None  # 新增
     created_at: Optional[str] = None
 
 
@@ -100,7 +104,7 @@ async def create_delivery(
         uploaded_by: Optional[str] = Form(None),
         delivery_order_image: Optional[UploadFile] = File(None),
         service: DeliveryService = Depends(get_delivery_service),
-        current_user: str = "admin"
+        current_user: dict = Depends(get_current_user)  # 使用认证依赖获取当前用户
 ):
     """创建报货订单（支持上传联单图片）"""
     try:

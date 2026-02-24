@@ -408,9 +408,16 @@ class WeighbillService:
 
         return result
 
-    def create_weighbill(self, data: Dict, image_path: str = None, is_manual: bool = False) -> Dict[str, Any]:
+    def create_weighbill(self, data: Dict, image_path: str = None, is_manual: bool = False, current_user: dict = None) -> Dict[str, Any]:
         """创建磅单记录"""
         try:
+            # 处理操作人信息
+            uploader_id = None
+            uploader_name = "system"
+            if current_user:
+                uploader_id = current_user.get("id")
+                uploader_name = current_user.get("name") or current_user.get("account") or "system"
+
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
@@ -418,8 +425,8 @@ class WeighbillService:
                         (weigh_date, delivery_time, weigh_ticket_no, contract_no, delivery_id, vehicle_no,
                          product_name, gross_weight, tare_weight, net_weight,
                          unit_price, total_amount, weighbill_image, ocr_status, 
-                         ocr_raw_data, is_manual_corrected)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         ocr_raw_data, is_manual_corrected, uploader_id, uploader_name, uploaded_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     """, (
                         data.get("weigh_date"),
                         data.get("delivery_time"),
@@ -437,6 +444,8 @@ class WeighbillService:
                         "已确认" if is_manual else "待确认",
                         data.get("raw_text"),
                         1 if is_manual else 0,
+                        uploader_id,
+                        uploader_name,
                     ))
 
                     bill_id = cur.lastrowid
@@ -444,7 +453,11 @@ class WeighbillService:
                     return {
                         "success": True,
                         "message": "磅单保存成功",
-                        "data": {"id": bill_id}
+                        "data": {
+                            "id": bill_id,
+                            "uploader_id": uploader_id,
+                            "uploader_name": uploader_name,
+                        }
                     }
 
         except Exception as e:
@@ -523,6 +536,9 @@ class WeighbillService:
                             ("已完成", delivery_id, "已取消", "已完成"),
                         )
 
+                    conn.commit()
+
+
                     return {
                         "success": True,
                         "message": "磅单已确认",
@@ -550,7 +566,7 @@ class WeighbillService:
                     data = dict(zip(columns, row))
 
                     # 转换时间
-                    for key in ["weigh_date", "delivery_time", "created_at", "updated_at"]:
+                    for key in ["weigh_date", "delivery_time", "created_at", "updated_at", "uploaded_at"]:  # 新增 uploaded_at
                         if data.get(key):
                             data[key] = str(data[key])
 
@@ -639,7 +655,7 @@ class WeighbillService:
                     data = []
                     for row in rows:
                         item = dict(zip(columns, row))
-                        for key in ["weigh_date", "delivery_time", "created_at", "updated_at"]:
+                        for key in ["weigh_date", "delivery_time", "created_at", "updated_at", "uploaded_at"]:  # 新增 uploaded_at
                             if item.get(key):
                                 item[key] = str(item[key])
                         data.append(item)
