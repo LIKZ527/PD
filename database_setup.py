@@ -130,7 +130,6 @@ TABLE_STATEMENTS = [
 	CREATE TABLE IF NOT EXISTS pd_deliveries (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
 		report_date DATE COMMENT '报货日期',
-		delivery_time DATETIME COMMENT '送货时间',
 		warehouse VARCHAR(64) COMMENT '送货库房',
 		target_factory_id BIGINT COMMENT '目标工厂ID（关联pd_customers）',
 		target_factory_name VARCHAR(128) COMMENT '目标工厂名称',
@@ -163,6 +162,7 @@ TABLE_STATEMENTS = [
 	CREATE TABLE IF NOT EXISTS pd_weighbills (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
 		weigh_date DATE COMMENT '磅单日期',
+		delivery_time DATETIME COMMENT '送货时间',
 		weigh_ticket_no VARCHAR(64) COMMENT '过磅单号',
 		contract_no VARCHAR(64) COMMENT '合同编号（OCR识别）',
 		delivery_id BIGINT COMMENT '关联的报货订单ID（通过日期+车牌匹配）',

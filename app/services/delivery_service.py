@@ -23,6 +23,11 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 class DeliveryService:
     """报货订单服务"""
 
+    def _get_upload_status(self, image_path: Optional[str]) -> str:
+        if image_path and os.path.exists(image_path):
+            return "联单已上传"
+        return "联单未上传"
+
     def _determine_source_type(self, has_order: str, uploaded_by: str = None) -> str:
         """
         确定来源类型
@@ -124,14 +129,13 @@ class DeliveryService:
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO pd_deliveries 
-                        (report_date, delivery_time, warehouse, target_factory_id, target_factory_name,
+                        (report_date, warehouse, target_factory_id, target_factory_name,
                          product_name, quantity, vehicle_no, driver_name, driver_phone, driver_id_card,
                          has_delivery_order, delivery_order_image, source_type,
                          shipper, payee, service_fee, contract_no, contract_unit_price, total_amount, status)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         data.get('report_date'),
-                        data.get('delivery_time'),
                         data.get('warehouse'),
                         data.get('target_factory_id'),
                         data.get('target_factory_name'),
@@ -233,7 +237,7 @@ class DeliveryService:
 
                     # 构建更新SQL
                     fields = [
-                        'report_date', 'delivery_time', 'warehouse', 'target_factory_id', 'target_factory_name',
+                        'report_date', 'warehouse', 'target_factory_id', 'target_factory_name',
                         'product_name', 'quantity', 'vehicle_no', 'driver_name', 'driver_phone', 'driver_id_card',
                         'has_delivery_order', 'delivery_order_image', 'source_type',
                         'shipper', 'payee', 'service_fee', 'contract_no', 'contract_unit_price', 'total_amount',
@@ -295,9 +299,13 @@ class DeliveryService:
                     columns = [desc[0] for desc in cur.description]
                     data = dict(zip(columns, row))
 
-                    for key in ['report_date', 'delivery_time', 'created_at', 'updated_at']:
+                    for key in ['report_date', 'created_at', 'updated_at']:
                         if data.get(key):
                             data[key] = str(data[key])
+
+                    data["delivery_order_upload_status"] = self._get_upload_status(
+                        data.get("delivery_order_image")
+                    )
 
                     return data
 
@@ -384,9 +392,12 @@ class DeliveryService:
                     data = []
                     for row in rows:
                         item = dict(zip(columns, row))
-                        for key in ['report_date', 'delivery_time', 'created_at', 'updated_at']:
+                        for key in ['report_date', 'created_at', 'updated_at']:
                             if item.get(key):
                                 item[key] = str(item[key])
+                        item["delivery_order_upload_status"] = self._get_upload_status(
+                            item.get("delivery_order_image")
+                        )
                         data.append(item)
 
                     return {

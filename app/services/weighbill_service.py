@@ -275,7 +275,7 @@ class WeighbillService:
     def match_delivery_info(self, weigh_date: str, vehicle_no: str) -> Optional[Dict]:
         """
         通过日期+车牌号匹配报货订单
-        获取：送货库房、目标工厂、送货时间、货物品种、司机信息等
+        获取：送货库房、目标工厂、货物品种、司机信息等
         """
         try:
             with get_conn() as conn:
@@ -378,7 +378,6 @@ class WeighbillService:
                 result["matched_delivery_id"] = delivery["id"]
                 result["warehouse"] = delivery.get("warehouse")
                 result["target_factory_name"] = delivery.get("target_factory_name")
-                result["delivery_time"] = str(delivery.get("delivery_time")) if delivery.get("delivery_time") else None
                 result["driver_name"] = delivery.get("driver_name")
                 result["driver_phone"] = delivery.get("driver_phone")
                 result["driver_id_card"] = delivery.get("driver_id_card")
@@ -416,13 +415,14 @@ class WeighbillService:
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO pd_weighbills 
-                        (weigh_date, weigh_ticket_no, contract_no, delivery_id, vehicle_no,
+                        (weigh_date, delivery_time, weigh_ticket_no, contract_no, delivery_id, vehicle_no,
                          product_name, gross_weight, tare_weight, net_weight,
                          unit_price, total_amount, weighbill_image, ocr_status, 
                          ocr_raw_data, is_manual_corrected)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         data.get("weigh_date"),
+                        data.get("delivery_time"),
                         data.get("weigh_ticket_no"),
                         data.get("contract_no"),
                         data.get("matched_delivery_id"),
@@ -463,7 +463,7 @@ class WeighbillService:
 
                     # 构建更新SQL
                     fields = [
-                        "weigh_date", "weigh_ticket_no", "contract_no", "delivery_id", "vehicle_no",
+                        "weigh_date", "delivery_time", "weigh_ticket_no", "contract_no", "delivery_id", "vehicle_no",
                         "product_name", "gross_weight", "tare_weight", "net_weight",
                         "unit_price", "total_amount", "ocr_status", "is_manual_corrected"
                     ]
@@ -550,7 +550,7 @@ class WeighbillService:
                     data = dict(zip(columns, row))
 
                     # 转换时间
-                    for key in ["weigh_date", "created_at", "updated_at"]:
+                    for key in ["weigh_date", "delivery_time", "created_at", "updated_at"]:
                         if data.get(key):
                             data[key] = str(data[key])
 
@@ -639,7 +639,7 @@ class WeighbillService:
                     data = []
                     for row in rows:
                         item = dict(zip(columns, row))
-                        for key in ["weigh_date", "created_at", "updated_at"]:
+                        for key in ["weigh_date", "delivery_time", "created_at", "updated_at"]:
                             if item.get(key):
                                 item[key] = str(item[key])
                         data.append(item)

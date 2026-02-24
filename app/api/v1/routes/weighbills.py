@@ -106,6 +106,7 @@ class WeighbillUpdateRequest(BaseModel):
 class WeighbillOut(BaseModel):
     id: int
     weigh_date: Optional[str] = None
+    delivery_time: Optional[str] = None
     weigh_ticket_no: Optional[str] = None
     contract_no: Optional[str] = None
     vehicle_no: Optional[str] = None
@@ -396,7 +397,7 @@ async def match_delivery(
     delivery = service.match_delivery_info(weigh_date, vehicle_no)
     if delivery:
         # 转换时间格式
-        for key in ["report_date", "delivery_time", "created_at", "updated_at"]:
+        for key in ["report_date", "created_at", "updated_at"]:
             if delivery.get(key):
                 delivery[key] = str(delivery[key])
         return {"success": True, "data": delivery, "matched": True}

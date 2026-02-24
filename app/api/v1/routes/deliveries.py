@@ -20,7 +20,6 @@ router = APIRouter(prefix="/deliveries", tags=["销售台账/报货订单"])
 
 class DeliveryCreateRequest(BaseModel):
     report_date: str = Field(..., description="报货日期")
-    delivery_time: Optional[str] = Field(None, description="送货时间")
     warehouse: Optional[str] = Field(None, description="送货库房")
     target_factory_id: Optional[int] = Field(None, description="目标工厂ID")
     target_factory_name: str = Field(..., description="目标工厂名称")
@@ -39,7 +38,6 @@ class DeliveryCreateRequest(BaseModel):
 
 class DeliveryUpdateRequest(BaseModel):
     report_date: Optional[str] = None
-    delivery_time: Optional[str] = None
     warehouse: Optional[str] = None
     target_factory_id: Optional[int] = None
     target_factory_name: Optional[str] = None
@@ -59,7 +57,6 @@ class DeliveryUpdateRequest(BaseModel):
 class DeliveryOut(BaseModel):
     id: int
     report_date: Optional[str] = None
-    delivery_time: Optional[str] = None
     warehouse: Optional[str] = None
     target_factory_name: Optional[str] = None
     product_name: Optional[str] = None
@@ -70,6 +67,7 @@ class DeliveryOut(BaseModel):
     driver_id_card: Optional[str] = None
     has_delivery_order: Optional[str] = None
     delivery_order_image: Optional[str] = None
+    delivery_order_upload_status: Optional[str] = None
     source_type: Optional[str] = None
     shipper: Optional[str] = None
     payee: Optional[str] = None
@@ -86,7 +84,6 @@ class DeliveryOut(BaseModel):
 @router.post("/", response_model=dict)
 async def create_delivery(
         report_date: str = Form(...),
-        delivery_time: Optional[str] = Form(None),
         warehouse: Optional[str] = Form(None),
         target_factory_id: Optional[int] = Form(None),
         target_factory_name: str = Form(...),
@@ -109,7 +106,6 @@ async def create_delivery(
     try:
         data = {
             "report_date": report_date,
-            "delivery_time": delivery_time,
             "warehouse": warehouse,
             "target_factory_id": target_factory_id,
             "target_factory_name": target_factory_name,
