@@ -307,6 +307,51 @@ TABLE_STATEMENTS = [
 		INDEX idx_balance_id (balance_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='支付回单与结余核销关联表';
 	""",
+	"""
+	CREATE TABLE IF NOT EXISTS pd_payment_details (
+		id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '收款明细ID',
+		sales_order_id BIGINT NOT NULL COMMENT '销售订单ID',
+		smelter_name VARCHAR(100) NOT NULL COMMENT '冶炼厂名称',
+		contract_no VARCHAR(50) NOT NULL COMMENT '合同编号',
+		material_name VARCHAR(100) DEFAULT '' COMMENT '物料名称',
+		unit_price DECIMAL(15, 2) NOT NULL COMMENT '合同单价（元/吨）',
+		net_weight DECIMAL(15, 4) NOT NULL COMMENT '净重（吨）',
+		total_amount DECIMAL(15, 2) NOT NULL COMMENT '应回款总额',
+		paid_amount DECIMAL(15, 2) DEFAULT 0.00 COMMENT '累计已付金额',
+		unpaid_amount DECIMAL(15, 2) NOT NULL COMMENT '未付金额',
+		status TINYINT DEFAULT 0 COMMENT '回款状态：0-未回款, 1-部分回款, 2-已结清, 3-超额回款',
+		remark TEXT COMMENT '备注',
+		created_by BIGINT COMMENT '创建人ID',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+		INDEX idx_sales_order_id (sales_order_id),
+		INDEX idx_smelter_name (smelter_name),
+		INDEX idx_contract_no (contract_no),
+		INDEX idx_status (status),
+		INDEX idx_created_at (created_at)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='收款明细台账表';
+	""",
+	"""
+	CREATE TABLE IF NOT EXISTS pd_payment_records (
+		id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '回款记录ID',
+		payment_detail_id BIGINT NOT NULL COMMENT '关联的收款明细ID',
+		payment_amount DECIMAL(15, 2) NOT NULL COMMENT '本次回款金额',
+		payment_stage TINYINT DEFAULT 1 COMMENT '回款阶段：0-定金, 1-到货款(90%), 2-尾款(10%)',
+		payment_date DATE NOT NULL COMMENT '回款日期',
+		payment_method VARCHAR(50) DEFAULT '' COMMENT '支付方式（银行转账/现金/承兑等）',
+		transaction_no VARCHAR(100) DEFAULT '' COMMENT '交易流水号',
+		remark TEXT COMMENT '备注',
+		recorded_by BIGINT COMMENT '录入人ID',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '录入时间',
+
+		INDEX idx_payment_detail_id (payment_detail_id),
+		INDEX idx_payment_date (payment_date),
+		INDEX idx_payment_stage (payment_stage),
+
+		FOREIGN KEY (payment_detail_id) REFERENCES pd_payment_details(id) ON DELETE CASCADE
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='回款记录明细表';
+"""
 ]
 
 
