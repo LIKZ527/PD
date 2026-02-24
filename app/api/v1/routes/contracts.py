@@ -6,12 +6,13 @@ import csv
 import os
 import re
 import shutil
+import json
 from io import StringIO
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Body
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Body, Form
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
 from datetime import date
@@ -84,7 +85,7 @@ class ContractUpdateRequest(BaseModel):
 
 class ContractOut(BaseModel):
     id: int
-    seq_no: Optional[int] = None  # ← 改为可选
+    seq_no: Optional[int] = None
     contract_no: str
     contract_date: Optional[date] = None
     end_date: Optional[date] = None
@@ -94,8 +95,9 @@ class ContractOut(BaseModel):
     final_payment_ratio: float
     status: str
     products: List[ContractProductOut] = []
-    created_at: Optional[str] = None  # ← 保持str，但在获取数据时转换
-    updated_at: Optional[str] = None  # ← 也加上这个
+    contract_image_path: Optional[str] = None  # 新增：图片路径
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 # ============ 路由 ============
@@ -211,15 +213,64 @@ async def ocr_recognize(
 
 @router.post("/manual", response_model=ContractOut)
 async def create_manual(
-    request: ContractCreateRequest,
+    contract_data: str = Form(..., description="合同数据JSON字符串"),
+    file: Optional[UploadFile] = File(None, description="合同图片（可选）"),
     service: ContractService = Depends(get_contract_service)
 ):
-    """手动录入合同"""
-    try:
-        existing = service.get_contract_detail_by_no(request.contract_no)
-        if existing:
-            raise HTTPException(status_code=400, detail=f"合同编号 {request.contract_no} 已存在")
+    """
+    手动录入合同（支持图片上传）
 
+    contract_data格式示例：
+    {
+        "contract_no": "HT-2024-001",
+        "contract_date": "2024-01-15",
+        "end_date": "2024-01-20",
+        "smelter_company": "河南金利金铅集团有限公司",
+        "total_quantity": 100.5,
+        "arrival_payment_ratio": 0.9,
+        "final_payment_ratio": 0.1,
+        "products": [{"product_name": "电动车", "unit_price": 8500.00}],
+        "status": "生效中",
+        "remarks": "备注信息"
+    }
+    """
+    try:
+        # 解析JSON数据
+        request_data = json.loads(contract_data)
+        request = ContractCreateRequest(**request_data)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"JSON解析失败: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"参数格式错误: {str(e)}")
+
+    # 检查合同编号是否已存在
+    existing = service.get_contract_detail_by_no(request.contract_no)
+    if existing:
+        raise HTTPException(status_code=400, detail=f"合同编号 {request.contract_no} 已存在")
+
+    # 处理图片上传
+    image_path = None
+    if file:
+        allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/bmp"]
+        if file.content_type not in allowed_types:
+            raise HTTPException(status_code=400, detail="仅支持jpg/png/bmp格式")
+
+        # 生成安全文件名
+        safe_name = re.sub(r'[^\w\-]', '_', request.contract_no)
+        image_filename = f"{safe_name}.jpg"
+        image_path = UPLOAD_DIR / image_filename
+
+        # 如果文件已存在，先删除
+        if image_path.exists():
+            os.remove(image_path)
+
+        # 保存图片
+        with open(image_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        image_path = str(image_path)
+
+    try:
         data = {
             "contract_no": request.contract_no,
             "contract_date": request.contract_date,
@@ -230,6 +281,7 @@ async def create_manual(
             "final_payment_ratio": Decimal(str(request.final_payment_ratio)),
             "status": request.status,
             "remarks": request.remarks,
+            "contract_image_path": image_path,
         }
 
         products = []
@@ -245,11 +297,20 @@ async def create_manual(
             detail = service.get_contract_detail(result["data"]["id"])
             return detail
         else:
+            # 如果创建失败，删除已上传的图片
+            if image_path and os.path.exists(image_path):
+                os.remove(image_path)
             raise HTTPException(status_code=400, detail=result.get("error"))
 
     except HTTPException:
+        # 如果创建失败，删除已上传的图片
+        if image_path and os.path.exists(image_path):
+            os.remove(image_path)
         raise
     except Exception as e:
+        # 如果创建失败，删除已上传的图片
+        if image_path and os.path.exists(image_path):
+            os.remove(image_path)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -289,33 +350,104 @@ async def get_contract(
 @router.put("/{contract_id}", response_model=dict)
 async def update_contract(
     contract_id: int,
-    request: ContractUpdateRequest,
+    contract_data: Optional[str] = Form(None, description="合同数据JSON字符串"),
+    file: Optional[UploadFile] = File(None, description="新的合同图片（可选）"),
     service: ContractService = Depends(get_contract_service)
 ):
-    """编辑合同"""
-    try:
-        data = {}
-        if request.contract_no is not None:
-            data["contract_no"] = request.contract_no
-        if request.contract_date is not None:
-            data["contract_date"] = request.contract_date
-        if request.end_date is not None:
-            data["end_date"] = request.end_date
-        if request.smelter_company is not None:
-            data["smelter_company"] = request.smelter_company
-        if request.total_quantity is not None:
-            data["total_quantity"] = Decimal(str(request.total_quantity))
-        if request.arrival_payment_ratio is not None:
-            data["arrival_payment_ratio"] = Decimal(str(request.arrival_payment_ratio))
-        if request.final_payment_ratio is not None:
-            data["final_payment_ratio"] = Decimal(str(request.final_payment_ratio))
-        if request.status is not None:
-            data["status"] = request.status
-        if request.remarks is not None:
-            data["remarks"] = request.remarks
+    """
+    编辑合同（支持更新图片）
 
+    contract_data格式示例（可选，如果不传则不更新字段）：
+    {
+        "contract_no": "HT-2024-001",
+        "contract_date": "2024-01-15",
+        "end_date": "2024-01-20",
+        "smelter_company": "河南金利金铅集团有限公司",
+        "total_quantity": 100.5,
+        "arrival_payment_ratio": 0.9,
+        "final_payment_ratio": 0.1,
+        "products": [{"product_name": "电动车", "unit_price": 8500.00}],
+        "status": "生效中",
+        "remarks": "备注信息"
+    }
+    """
+    # 解析JSON数据（如果提供）
+    request = None
+    if contract_data:
+        try:
+            request_data = json.loads(contract_data)
+            request = ContractUpdateRequest(**request_data)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"JSON解析失败: {str(e)}")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"参数格式错误: {str(e)}")
+
+    # 获取原合同信息
+    old_contract = service.get_contract_detail(contract_id)
+    if not old_contract:
+        raise HTTPException(status_code=404, detail="合同不存在")
+
+    # 处理图片上传
+    new_image_path = None
+    old_image_path = old_contract.get("contract_image_path")
+
+    if file:
+        allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/bmp"]
+        if file.content_type not in allowed_types:
+            raise HTTPException(status_code=400, detail="仅支持jpg/png/bmp格式")
+
+        # 确定合同编号（可能变更）
+        contract_no = request.contract_no if request and request.contract_no else old_contract["contract_no"]
+
+        # 生成安全文件名
+        safe_name = re.sub(r'[^\w\-]', '_', contract_no)
+        image_filename = f"{safe_name}.jpg"
+        new_image_path = UPLOAD_DIR / image_filename
+
+        # 如果新路径与旧路径不同且旧文件存在，先删除旧文件
+        if old_image_path and str(new_image_path) != old_image_path and os.path.exists(old_image_path):
+            os.remove(old_image_path)
+
+        # 如果新文件已存在（可能是其他合同的文件），先删除
+        if new_image_path.exists():
+            os.remove(new_image_path)
+
+        # 保存新图片
+        with open(new_image_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        new_image_path = str(new_image_path)
+
+    try:
+        # 构建更新数据
+        data = {}
+        if request:
+            if request.contract_no is not None:
+                data["contract_no"] = request.contract_no
+            if request.contract_date is not None:
+                data["contract_date"] = request.contract_date
+            if request.end_date is not None:
+                data["end_date"] = request.end_date
+            if request.smelter_company is not None:
+                data["smelter_company"] = request.smelter_company
+            if request.total_quantity is not None:
+                data["total_quantity"] = Decimal(str(request.total_quantity))
+            if request.arrival_payment_ratio is not None:
+                data["arrival_payment_ratio"] = Decimal(str(request.arrival_payment_ratio))
+            if request.final_payment_ratio is not None:
+                data["final_payment_ratio"] = Decimal(str(request.final_payment_ratio))
+            if request.status is not None:
+                data["status"] = request.status
+            if request.remarks is not None:
+                data["remarks"] = request.remarks
+
+        # 如果有新图片，添加到更新数据
+        if new_image_path:
+            data["contract_image_path"] = new_image_path
+
+        # 处理品种明细
         products = None
-        if request.products is not None:
+        if request and request.products is not None:
             products = []
             for p in request.products:
                 products.append({
@@ -326,14 +458,24 @@ async def update_contract(
         result = service.update_contract(contract_id, data, products)
 
         if result["success"]:
-            return {"success": True, "message": "更新成功"}
+            return {"success": True, "message": "更新成功", "data": result.get("data")}
         else:
+            # 如果更新失败且上传了新图片，删除新图片
+            if new_image_path and os.path.exists(new_image_path):
+                os.remove(new_image_path)
             raise HTTPException(status_code=400, detail=result.get("error"))
 
     except HTTPException:
+        # 如果更新失败且上传了新图片，删除新图片
+        if new_image_path and os.path.exists(new_image_path):
+            os.remove(new_image_path)
         raise
     except Exception as e:
+        # 如果更新失败且上传了新图片，删除新图片
+        if new_image_path and os.path.exists(new_image_path):
+            os.remove(new_image_path)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/{contract_id}/image")
 async def get_contract_image(
@@ -367,12 +509,20 @@ async def get_contract_image(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取图片失败: {str(e)}")
 
+
 @router.delete("/{contract_id}")
 async def delete_contract(
     contract_id: int,
     service: ContractService = Depends(get_contract_service)
 ):
     """删除合同"""
+    # 获取合同信息（用于删除图片）
+    contract = service.get_contract_detail(contract_id)
+    if contract:
+        image_path = contract.get("contract_image_path")
+        if image_path and os.path.exists(image_path):
+            os.remove(image_path)
+
     result = service.delete_contract(contract_id)
     if result["success"]:
         return {"success": True, "message": "删除成功"}
