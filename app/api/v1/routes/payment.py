@@ -148,6 +148,8 @@ class PaymentResp(BaseModel):
     shipper: Optional[str] = None
     payee: Optional[str] = None
     service_fee: Optional[float] = None
+    # 联单费（计算字段：无联单时为150，有联单时为service_fee）
+    delivery_fee: Optional[float] = None
     delivery_contract_no: Optional[str] = None
     delivery_contract_unit_price: Optional[float] = None
     delivery_total_amount: Optional[float] = None

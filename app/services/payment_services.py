@@ -316,6 +316,21 @@ class PaymentService:
                     payment_detail_id
                 ))
 
+                conn.commit()  # 添加提交
+
+                # 返回结果
+                return {
+                    "payment_detail_id": payment_detail_id,
+                    "total_amount": float(total_amount),
+                    "paid_amount": float(new_paid),
+                    "unpaid_amount": float(unpaid_amount),
+                    "status": int(new_status),
+                    "status_name": new_status.name,
+                    "current_payment": float(payment_amount),
+                    "payment_stage": int(payment_stage),
+                    "payment_stage_name": payment_stage.name
+                }
+
     @staticmethod
     def list_payment_details(
             page: int = 1,
@@ -459,6 +474,14 @@ class PaymentService:
 
                     # 添加状态名称
                     item['status_name'] = PaymentStatus(item['status']).name if item.get('status') is not None else None
+                    
+                    # 计算联单费：如果 has_delivery_order 为 '无'，则联单费为 150
+                    has_delivery_order = item.get('has_delivery_order')
+                    if has_delivery_order == '无':
+                        item['delivery_fee'] = 150.0
+                    else:
+                        # 有联单时，使用 service_fee 字段，如果没有则默认为 0
+                        item['delivery_fee'] = float(item.get('service_fee') or 0)
 
                     items.append(item)
 
