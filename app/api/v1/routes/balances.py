@@ -64,9 +64,32 @@ class BalanceOut(BaseModel):
     paid_amount: Optional[float] = None
     balance_amount: Optional[float] = None
     payment_status: int = 0
+    payment_status_name: Optional[str] = None  # 新增
     created_at: Optional[str] = None
+    # 关联的磅单字段
+    weighbill_image: Optional[str] = None  # 新增
+    # 关联的支付回单摘要（可选）
+    receipt_count: Optional[int] = 0  # 新增：关联的回单数量
 
-
+class PaymentReceiptListOut(BaseModel):
+    """支付回单列表响应"""
+    id: int
+    receipt_no: Optional[str] = None
+    receipt_image: Optional[str] = None
+    payment_date: Optional[str] = None
+    payment_time: Optional[str] = None
+    payer_name: Optional[str] = None
+    payer_account: Optional[str] = None
+    payee_name: Optional[str] = None
+    payee_account: Optional[str] = None
+    amount: Optional[float] = None
+    bank_name: Optional[str] = None
+    remark: Optional[str] = None
+    ocr_status: int
+    ocr_status_name: str
+    is_manual_corrected: int
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 # ========== 路由 ==========
 
 @router.post("/generate")
@@ -277,3 +300,39 @@ async def get_payment_receipt(
     receipt['ocr_status_label'] = status_map.get(receipt.get('ocr_status'), "未知")
 
     return receipt
+
+
+@router.get("/payment-receipts", response_model=dict)
+async def list_payment_receipts(
+        exact_payee_name: Optional[str] = Query(None, description="精确收款人姓名"),
+        exact_ocr_status: Optional[int] = Query(None, ge=0, le=2, description="状态：0待确认/1已确认/2已核销"),
+        date_from: Optional[str] = Query(None, description="开始日期"),
+        date_to: Optional[str] = Query(None, description="结束日期"),
+        fuzzy_keywords: Optional[str] = Query(None, description="模糊关键词（空格分隔）"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        service: BalanceService = Depends(get_balance_service)
+):
+    """
+    查询支付回单列表
+
+    支持筛选：
+    - 精确收款人姓名
+    - 状态筛选（0待确认/1已确认/2已核销）
+    - 日期范围
+    - 模糊搜索（回单号/收款人/付款人/银行/备注）
+    """
+    result = service.list_payment_receipts(
+        exact_payee_name=exact_payee_name,
+        exact_ocr_status=exact_ocr_status,
+        date_from=date_from,
+        date_to=date_to,
+        fuzzy_keywords=fuzzy_keywords,
+        page=page,
+        page_size=page_size
+    )
+
+    if result["success"]:
+        return result
+    else:
+        raise HTTPException(status_code=500, detail=result.get("error"))
