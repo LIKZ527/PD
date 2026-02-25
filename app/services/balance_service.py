@@ -547,7 +547,7 @@ class BalanceService:
                              payment_status: int = None,
                              page: int = 1,
                              page_size: int = 20) -> Dict[str, Any]:
-        """查询结余明细列表"""
+        """查询结余明细列表（扩展版，包含关联信息）"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -555,10 +555,10 @@ class BalanceService:
                     params = []
 
                     if exact_contract_no:
-                        conditions.append("contract_no = %s")
+                        conditions.append("b.contract_no = %s")
                         params.append(exact_contract_no)
                     if exact_driver_name:
-                        conditions.append("driver_name = %s")
+                        conditions.append("b.driver_name = %s")
                         params.append(exact_driver_name)
                     if fuzzy_keywords:
                         tokens = [t for t in fuzzy_keywords.split() if t]
@@ -566,39 +566,51 @@ class BalanceService:
                         for token in tokens:
                             like = f"%{token}%"
                             or_clauses.append(
-                                "(contract_no LIKE %s OR driver_name LIKE %s OR driver_phone LIKE %s OR vehicle_no LIKE %s)"
+                                "(b.contract_no LIKE %s OR b.driver_name LIKE %s OR b.driver_phone LIKE %s OR b.vehicle_no LIKE %s)"
                             )
                             params.extend([like, like, like, like])
                         if or_clauses:
                             conditions.append("(" + " OR ".join(or_clauses) + ")")
                     if payment_status is not None:
-                        conditions.append("payment_status = %s")
+                        conditions.append("b.payment_status = %s")
                         params.append(payment_status)
 
                     where_sql = " AND ".join(conditions)
 
-                    where_clause = f"WHERE {where_sql}" if where_sql else ""
-
-                    # 总数
-                    cur.execute(f"SELECT COUNT(*) FROM pd_balance_details {where_clause}", tuple(params))
+                    # 查询总数
+                    cur.execute(f"""
+                        SELECT COUNT(*) FROM pd_balance_details b
+                        WHERE {where_sql}
+                    """, tuple(params))
                     total = cur.fetchone()[0]
 
-                    # 分页数据
+                    # 分页数据 - 关联磅单获取图片
                     offset = (page - 1) * page_size
                     cur.execute(f"""
-                        SELECT * FROM pd_balance_details 
-                        {where_clause}
-                        ORDER BY created_at DESC
+                        SELECT 
+                            b.*,
+                            w.weighbill_image,
+                            (SELECT COUNT(*) FROM pd_receipt_settlements rs 
+                             JOIN pd_payment_receipts pr ON rs.receipt_id = pr.id 
+                             WHERE rs.balance_id = b.id) as receipt_count
+                        FROM pd_balance_details b
+                        LEFT JOIN pd_weighbills w ON b.weighbill_id = w.id
+                        WHERE {where_sql}
+                        ORDER BY b.created_at DESC
                         LIMIT %s OFFSET %s
                     """, tuple(params + [page_size, offset]))
 
                     columns = [desc[0] for desc in cur.description]
                     data = []
+                    status_map = {0: "待支付", 1: "部分支付", 2: "已结清"}
+
                     for row in cur.fetchall():
                         item = dict(zip(columns, row))
                         for key in ['created_at', 'updated_at']:
                             if item.get(key):
                                 item[key] = str(item[key])
+                        # 添加状态名称
+                        item['payment_status_name'] = status_map.get(item.get('payment_status'), "未知")
                         data.append(item)
 
                     return {
@@ -657,6 +669,91 @@ class BalanceService:
             logger.error(f"查询支付回单失败: {e}")
             return None
 
+    def list_payment_receipts(
+        self,
+        exact_payee_name: str = None,
+        exact_ocr_status: int = None,
+        date_from: str = None,
+        date_to: str = None,
+        fuzzy_keywords: str = None,
+        page: int = 1,
+        page_size: int = 20
+    ) -> Dict[str, Any]:
+        """查询支付回单列表"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    conditions = ["1=1"]
+                    params = []
+
+                    if exact_payee_name:
+                        conditions.append("payee_name = %s")
+                        params.append(exact_payee_name)
+
+                    if exact_ocr_status is not None:
+                        conditions.append("ocr_status = %s")
+                        params.append(exact_ocr_status)
+
+                    if date_from:
+                        conditions.append("payment_date >= %s")
+                        params.append(date_from)
+
+                    if date_to:
+                        conditions.append("payment_date <= %s")
+                        params.append(date_to)
+
+                    if fuzzy_keywords:
+                        tokens = [t for t in fuzzy_keywords.split() if t]
+                        or_clauses = []
+                        for token in tokens:
+                            like = f"%{token}%"
+                            or_clauses.append(
+                                "(receipt_no LIKE %s OR payee_name LIKE %s OR payer_name LIKE %s "
+                                "OR bank_name LIKE %s OR remark LIKE %s)"
+                            )
+                            params.extend([like, like, like, like, like])
+                        if or_clauses:
+                            conditions.append("(" + " OR ".join(or_clauses) + ")")
+
+                    where_sql = " AND ".join(conditions)
+
+                    # 查询总数
+                    cur.execute(f"SELECT COUNT(*) FROM pd_payment_receipts WHERE {where_sql}", tuple(params))
+                    total = cur.fetchone()[0]
+
+                    # 分页数据
+                    offset = (page - 1) * page_size
+                    cur.execute(f"""
+                        SELECT * FROM pd_payment_receipts 
+                        WHERE {where_sql}
+                        ORDER BY created_at DESC
+                        LIMIT %s OFFSET %s
+                    """, tuple(params + [page_size, offset]))
+
+                    columns = [desc[0] for desc in cur.description]
+                    data = []
+                    for row in cur.fetchall():
+                        item = dict(zip(columns, row))
+                        # 转换时间字段
+                        for key in ['payment_date', 'payment_time', 'created_at', 'updated_at']:
+                            if item.get(key):
+                                item[key] = str(item[key])
+                        # 添加状态名称
+                        status_map = {0: "待确认", 1: "已确认", 2: "已核销"}
+                        item['ocr_status_name'] = status_map.get(item.get('ocr_status'), "未知")
+                        data.append(item)
+
+                    return {
+                        "success": True,
+                        "data": data,
+                        "total": total,
+                        "page": page,
+                        "page_size": page_size
+                    }
+
+        except Exception as e:
+            logger.error(f"查询支付回单列表失败: {e}")
+            return {"success": False, "error": str(e), "data": [], "total": 0}
 
 _balance_service = None
 
