@@ -491,3 +491,613 @@ class PaymentService:
                     "size": size,
                     "items": items
                 }
+            
+
+    @staticmethod
+    def get_payment_detail(payment_id: int) -> Optional[Dict[str, Any]]:
+        """
+        获取收款明细详情（包含回款记录）
+        
+        Args:
+            payment_id: 收款明细ID
+            
+        Returns:
+            收款明细详情，包含回款记录列表
+        """
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # 查询收款明细主表
+                select_sql = build_dynamic_select(
+                    cur,
+                    PaymentService.TABLE_NAME,
+                    where_clause="id=%s"
+                )
+                cur.execute(select_sql, (payment_id,))
+                detail = cur.fetchone()
+                
+                if not detail:
+                    return None
+                
+                detail = dict(detail)
+                
+                # 添加状态名称
+                detail['status_name'] = PaymentStatus(detail['status']).name if detail.get('status') is not None else None
+                
+                # 转换时间字段
+                time_fields = ['created_at', 'updated_at']
+                for field in time_fields:
+                    if detail.get(field):
+                        detail[field] = str(detail[field])
+                
+                # 查询关联的磅单和销售台账信息（复用list_payment_details的关联逻辑）
+                query_sql = f"""
+                    SELECT 
+                        wb.id as weighbill_id,
+                        wb.weigh_date,
+                        wb.delivery_time,
+                        wb.weigh_ticket_no,
+                        wb.vehicle_no as weighbill_vehicle_no,
+                        wb.product_name as weighbill_product_name,
+                        wb.gross_weight,
+                        wb.tare_weight,
+                        wb.net_weight as weighbill_net_weight,
+                        wb.unit_price as weighbill_unit_price,
+                        wb.total_amount as weighbill_total_amount,
+                        wb.weighbill_image,
+                        wb.ocr_status,
+                        wb.is_manual_corrected,
+                        wb.payment_schedule_date,
+                        wb.uploader_id as weighbill_uploader_id,
+                        wb.uploader_name as weighbill_uploader_name,
+                        wb.uploaded_at as weighbill_uploaded_at,
+                        d.id as delivery_id,
+                        d.report_date,
+                        d.warehouse,
+                        d.target_factory_id,
+                        d.target_factory_name,
+                        d.quantity as delivery_quantity,
+                        d.vehicle_no as delivery_vehicle_no,
+                        d.driver_name,
+                        d.driver_phone,
+                        d.driver_id_card,
+                        d.has_delivery_order,
+                        d.delivery_order_image,
+                        d.source_type,
+                        d.shipper,
+                        d.payee,
+                        d.service_fee,
+                        d.contract_no as delivery_contract_no,
+                        d.contract_unit_price,
+                        d.total_amount as delivery_total_amount,
+                        d.status as delivery_status,
+                        d.uploader_id as delivery_uploader_id,
+                        d.uploader_name as delivery_uploader_name,
+                        d.uploaded_at as delivery_uploaded_at
+                    FROM {PaymentService.TABLE_NAME} pd
+                    LEFT JOIN sales_orders so ON pd.sales_order_id = so.id
+                    LEFT JOIN pd_weighbills wb ON so.id = wb.sales_order_id
+                    LEFT JOIN pd_deliveries d ON wb.delivery_id = d.id
+                    WHERE pd.id = %s
+                    LIMIT 1
+                """
+                cur.execute(query_sql, (payment_id,))
+                extra_info = cur.fetchone()
+                
+                if extra_info:
+                    extra_info = dict(extra_info)
+                    # 转换时间字段
+                    time_fields = ['weigh_date', 'delivery_time', 'weighbill_uploaded_at', 
+                                  'report_date', 'delivery_uploaded_at']
+                    for field in time_fields:
+                        if extra_info.get(field):
+                            extra_info[field] = str(extra_info[field])
+                    
+                    # 计算联单费
+                    has_delivery_order = extra_info.get('has_delivery_order')
+                    if has_delivery_order == '无':
+                        extra_info['delivery_fee'] = 150.0
+                    else:
+                        extra_info['delivery_fee'] = float(extra_info.get('service_fee') or 0)
+                    
+                    detail.update(extra_info)
+                
+                # 查询回款记录
+                records_sql = f"""
+                    SELECT 
+                        id,
+                        payment_amount,
+                        payment_stage,
+                        payment_date,
+                        payment_method,
+                        transaction_no,
+                        remark,
+                        created_at
+                    FROM {PaymentService.RECORD_TABLE}
+                    WHERE payment_detail_id = %s
+                    ORDER BY payment_date DESC, created_at DESC
+                """
+                cur.execute(records_sql, (payment_id,))
+                records = cur.fetchall()
+                
+                payment_records = []
+                for record in records:
+                    rec = dict(record)
+                    rec['payment_stage_name'] = PaymentStage(rec['payment_stage']).name if rec.get('payment_stage') is not None else None
+                    rec['payment_date'] = str(rec['payment_date']) if rec.get('payment_date') else None
+                    rec['created_at'] = str(rec['created_at']) if rec.get('created_at') else None
+                    payment_records.append(rec)
+                
+                detail['payment_records'] = payment_records
+                detail['payment_count'] = len(payment_records)
+                
+                return detail
+
+    @staticmethod
+    def update_payment_detail(
+        payment_id: int,
+        smelter_name: Optional[str] = None,
+        contract_no: Optional[str] = None,
+        material_name: Optional[str] = None,
+        remark: Optional[str] = None,
+        updated_by: Optional[int] = None
+    ) -> bool:
+        """
+        更新收款明细基础信息
+        
+        Args:
+            payment_id: 收款明细ID
+            smelter_name: 冶炼厂名称
+            contract_no: 合同编号
+            material_name: 物料名称
+            remark: 备注
+            updated_by: 更新人ID
+            
+        Returns:
+            是否更新成功
+            
+        Raises:
+            ValueError: 收款明细不存在
+        """
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # 检查收款明细是否存在
+                cur.execute(
+                    f"SELECT id, status FROM {PaymentService.TABLE_NAME} WHERE id=%s",
+                    (payment_id,)
+                )
+                existing = cur.fetchone()
+                
+                if not existing:
+                    raise ValueError("收款明细不存在")
+                
+                # 如果已结清，限制修改
+                if existing['status'] == PaymentStatus.PAID:
+                    # 只允许修改备注
+                    if smelter_name or contract_no or material_name:
+                        raise ValueError("已结清的收款明细只允许修改备注")
+                
+                # 动态构建更新字段
+                update_fields = []
+                params = []
+                
+                if smelter_name is not None:
+                    update_fields.append("smelter_name = %s")
+                    params.append(smelter_name)
+                
+                if contract_no is not None:
+                    update_fields.append("contract_no = %s")
+                    params.append(contract_no)
+                
+                if material_name is not None:
+                    update_fields.append("material_name = %s")
+                    params.append(material_name)
+                
+                if remark is not None:
+                    update_fields.append("remark = %s")
+                    params.append(remark)
+                
+                if not update_fields:
+                    return True  # 没有需要更新的字段
+                
+                update_fields.append("updated_at = %s")
+                params.append(datetime.now())
+                
+                params.append(payment_id)
+                
+                update_sql = f"""
+                    UPDATE {_quote_identifier(PaymentService.TABLE_NAME)}
+                    SET {', '.join(update_fields)}
+                    WHERE id = %s
+                """
+                
+                cur.execute(update_sql, tuple(params))
+                conn.commit()
+                
+                logger.info(f"更新收款明细成功: ID={payment_id}")
+                return True
+
+    @staticmethod
+    def delete_payment_detail(payment_id: int) -> bool:
+        """
+        删除收款明细
+        
+        Args:
+            payment_id: 收款明细ID
+            
+        Returns:
+            是否删除成功
+            
+        Raises:
+            ValueError: 收款明细不存在或已有回款记录无法删除
+        """
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # 检查收款明细是否存在
+                cur.execute(
+                    f"SELECT id, paid_amount, status FROM {PaymentService.TABLE_NAME} WHERE id=%s",
+                    (payment_id,)
+                )
+                existing = cur.fetchone()
+                
+                if not existing:
+                    raise ValueError("收款明细不存在")
+                
+                # 检查是否有回款记录
+                if existing['paid_amount'] > 0 or existing['status'] != PaymentStatus.UNPAID:
+                    raise ValueError("已有回款记录的明细无法删除，请先删除回款记录")
+                
+                # 检查是否存在关联的回款记录表记录
+                cur.execute(
+                    f"SELECT COUNT(*) as count FROM {PaymentService.RECORD_TABLE} WHERE payment_detail_id=%s",
+                    (payment_id,)
+                )
+                record_count = cur.fetchone()['count']
+                
+                if record_count > 0:
+                    raise ValueError(f"存在{record_count}条回款记录，无法删除收款明细")
+                
+                # 执行删除
+                delete_sql = f"DELETE FROM {_quote_identifier(PaymentService.TABLE_NAME)} WHERE id = %s"
+                cur.execute(delete_sql, (payment_id,))
+                conn.commit()
+                
+                logger.info(f"删除收款明细成功: ID={payment_id}")
+                return True
+
+    @staticmethod
+    def get_contract_shipping_progress(
+        contract_no: Optional[str] = None,
+        smelter_name: Optional[str] = None,
+        page: int = 1,
+        size: int = 20
+    ) -> Dict[str, Any]:
+        """
+        获取合同发运进度列表
+        统计每个合同的车数、吨数、已运/剩余情况
+        """
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # 构建WHERE条件
+                where_clauses = ["1=1"]
+                params = []
+                
+                if contract_no:
+                    where_clauses.append("pd.contract_no LIKE %s")
+                    params.append(f"%{contract_no}%")
+                
+                if smelter_name:
+                    where_clauses.append("pd.smelter_name LIKE %s")
+                    params.append(f"%{smelter_name}%")
+                
+                where_sql = " AND ".join(where_clauses)
+                
+                # 查询总数
+                count_sql = f"""
+                    SELECT COUNT(DISTINCT pd.contract_no) as total 
+                    FROM {PaymentService.TABLE_NAME} pd
+                    WHERE {where_sql}
+                """
+                cur.execute(count_sql, tuple(params))
+                total = cur.fetchone()["total"]
+                
+                # 查询合同发运进度
+                offset = (page - 1) * size
+                query_sql = f"""
+                    SELECT 
+                        pd.contract_no,
+                        pd.smelter_name,
+                        COUNT(DISTINCT pd.id) as total_orders,
+                        SUM(pd.net_weight) as planned_total_weight,
+                        COUNT(DISTINCT wb.id) as shipped_vehicles,
+                        SUM(CASE WHEN wb.id IS NOT NULL THEN wb.net_weight ELSE 0 END) as shipped_weight,
+                        SUM(pd.net_weight) - SUM(CASE WHEN wb.id IS NOT NULL THEN wb.net_weight ELSE 0 END) as remaining_weight,
+                        MAX(wb.weigh_date) as last_ship_date
+                    FROM {PaymentService.TABLE_NAME} pd
+                    LEFT JOIN sales_orders so ON pd.sales_order_id = so.id
+                    LEFT JOIN pd_weighbills wb ON so.id = wb.sales_order_id
+                    WHERE {where_sql}
+                    GROUP BY pd.contract_no, pd.smelter_name
+                    ORDER BY MAX(pd.created_at) DESC
+                    LIMIT %s OFFSET %s
+                """
+                
+                cur.execute(query_sql, tuple(params + [size, offset]))
+                rows = cur.fetchall()
+                
+                items = []
+                for row in rows:
+                    item = dict(row)
+                    planned_weight = float(item.get('planned_total_weight') or 0)
+                    shipped_weight = float(item.get('shipped_weight') or 0)
+                    shipped_vehicles = int(item.get('shipped_vehicles') or 0)
+                    remaining_weight = planned_weight - shipped_weight
+                    
+                    # 估算剩余车数
+                    if shipped_vehicles > 0 and shipped_weight > 0:
+                        avg_weight_per_vehicle = shipped_weight / shipped_vehicles
+                        remaining_vehicles = int(remaining_weight / avg_weight_per_vehicle) if avg_weight_per_vehicle > 0 else 0
+                    else:
+                        remaining_vehicles = int(remaining_weight / 30) if remaining_weight > 0 else 0
+                    
+                    total_vehicles = shipped_vehicles + remaining_vehicles
+                    
+                    items.append({
+                        "contract_no": item["contract_no"],
+                        "smelter_name": item["smelter_name"],
+                        "total_vehicles": total_vehicles,
+                        "planned_total_weight": round(planned_weight, 2),
+                        "shipped_vehicles": shipped_vehicles,
+                        "remaining_vehicles": remaining_vehicles,
+                        "shipped_weight": round(shipped_weight, 2),
+                        "remaining_weight": round(remaining_weight, 2),
+                        "last_ship_date": str(item["last_ship_date"]) if item.get("last_ship_date") else None,
+                        "progress_rate": round(shipped_weight / planned_weight * 100, 2) if planned_weight > 0 else 0
+                    })
+                
+                return {
+                    "total": total,
+                    "page": page,
+                    "size": size,
+                    "items": items
+                }
+
+    @staticmethod
+    def get_contract_payment_summary(
+        contract_no: Optional[str] = None,
+        smelter_name: Optional[str] = None,
+        status: Optional[int] = None,
+        page: int = 1,
+        size: int = 20
+    ) -> Dict[str, Any]:
+        """
+        获取合同回款汇总列表（按合同编号分组）
+        """
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                where_clauses = ["1=1"]
+                params = []
+                
+                if contract_no:
+                    where_clauses.append("pd.contract_no LIKE %s")
+                    params.append(f"%{contract_no}%")
+                
+                if smelter_name:
+                    where_clauses.append("pd.smelter_name LIKE %s")
+                    params.append(f"%{smelter_name}%")
+                
+                if status is not None:
+                    where_clauses.append("pd.status = %s")
+                    params.append(status)
+                
+                where_sql = " AND ".join(where_clauses)
+                
+                count_sql = f"""
+                    SELECT COUNT(DISTINCT pd.contract_no) as total 
+                    FROM {PaymentService.TABLE_NAME} pd
+                    WHERE {where_sql}
+                """
+                cur.execute(count_sql, tuple(params))
+                total = cur.fetchone()["total"]
+                
+                offset = (page - 1) * size
+                query_sql = f"""
+                    SELECT 
+                        pd.contract_no,
+                        pd.smelter_name,
+                        SUM(pd.total_amount) as total_receivable,
+                        SUM(pd.paid_amount) as total_received,
+                        SUM(pd.unpaid_amount) as total_unreceived,
+                        COUNT(DISTINCT pd.id) as order_count,
+                        SUM(CASE WHEN pd.status = 0 THEN 1 ELSE 0 END) as unpaid_count,
+                        SUM(CASE WHEN pd.status = 1 THEN 1 ELSE 0 END) as partial_count,
+                        SUM(CASE WHEN pd.status = 2 THEN 1 ELSE 0 END) as paid_count,
+                        SUM(CASE WHEN pd.status = 3 THEN 1 ELSE 0 END) as overpaid_count,
+                        MAX(pr.payment_date) as last_payment_date
+                    FROM {PaymentService.TABLE_NAME} pd
+                    LEFT JOIN {PaymentService.RECORD_TABLE} pr ON pd.id = pr.payment_detail_id
+                    WHERE {where_sql}
+                    GROUP BY pd.contract_no, pd.smelter_name
+                    ORDER BY SUM(pd.total_amount) DESC
+                    LIMIT %s OFFSET %s
+                """
+                
+                cur.execute(query_sql, tuple(params + [size, offset]))
+                rows = cur.fetchall()
+                
+                items = []
+                for row in rows:
+                    item = dict(row)
+                    total_receivable = float(item.get('total_receivable') or 0)
+                    total_received = float(item.get('total_received') or 0)
+                    total_unreceived = float(item.get('total_unreceived') or 0)
+                    
+                    # 确定合同整体回款状态
+                    order_count = int(item.get('order_count') or 0)
+                    unpaid_count = int(item.get('unpaid_count') or 0)
+                    paid_count = int(item.get('paid_count') or 0)
+                    overpaid_count = int(item.get('overpaid_count') or 0)
+                    
+                    if unpaid_count == order_count:
+                        contract_status = 0
+                        contract_status_name = "未回款"
+                    elif paid_count == order_count:
+                        contract_status = 2
+                        contract_status_name = "已结清"
+                    elif overpaid_count > 0:
+                        contract_status = 3
+                        contract_status_name = "超额回款"
+                    else:
+                        contract_status = 1
+                        contract_status_name = "部分回款"
+                    
+                    items.append({
+                        "contract_no": item["contract_no"],
+                        "smelter_name": item["smelter_name"],
+                        "order_count": order_count,
+                        "total_receivable": round(total_receivable, 2),
+                        "total_received": round(total_received, 2),
+                        "total_unreceived": round(total_unreceived, 2),
+                        "collection_rate": round(total_received / total_receivable * 100, 2) if total_receivable > 0 else 0,
+                        "contract_status": contract_status,
+                        "contract_status_name": contract_status_name,
+                        "status_breakdown": {
+                            "unpaid": unpaid_count,
+                            "partial": int(item.get("partial_count") or 0),
+                            "paid": paid_count,
+                            "overpaid": overpaid_count
+                        },
+                        "last_payment_date": str(item["last_payment_date"]) if item.get("last_payment_date") else None
+                    })
+                
+                return {
+                    "total": total,
+                    "page": page,
+                    "size": size,
+                    "items": items
+                }
+
+    @staticmethod
+    def get_contract_payment_details(
+        contract_no: str,
+        page: int = 1,
+        size: int = 20
+    ) -> Dict[str, Any]:
+        """
+        获取单个合同的回款明细列表
+        """
+        if not contract_no:
+            raise ValueError("合同编号不能为空")
+        
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # 查询合同基本信息
+                contract_sql = f"""
+                    SELECT DISTINCT
+                        pd.contract_no,
+                        pd.smelter_name,
+                        SUM(pd.total_amount) as contract_total,
+                        SUM(pd.paid_amount) as contract_paid,
+                        SUM(pd.unpaid_amount) as contract_unpaid
+                    FROM {PaymentService.TABLE_NAME} pd
+                    WHERE pd.contract_no = %s
+                    GROUP BY pd.contract_no, pd.smelter_name
+                """
+                cur.execute(contract_sql, (contract_no,))
+                contract_info = cur.fetchone()
+                
+                if not contract_info:
+                    raise ValueError("合同不存在")
+                
+                # 查询该合同下的所有收款明细
+                where_sql = "pd.contract_no = %s"
+                params = [contract_no]
+                
+                count_sql = f"""
+                    SELECT COUNT(*) as total 
+                    FROM {PaymentService.TABLE_NAME} pd
+                    WHERE {where_sql}
+                """
+                cur.execute(count_sql, tuple(params))
+                total = cur.fetchone()["total"]
+                
+                offset = (page - 1) * size
+                query_sql = f"""
+                    SELECT 
+                        pd.id,
+                        pd.sales_order_id,
+                        pd.material_name,
+                        pd.unit_price,
+                        pd.net_weight,
+                        pd.total_amount,
+                        pd.paid_amount,
+                        pd.unpaid_amount,
+                        pd.status,
+                        pd.remark,
+                        pd.created_at,
+                        wb.weigh_ticket_no,
+                        wb.weigh_date,
+                        wb.net_weight as shipped_weight,
+                        (SELECT COUNT(*) FROM {PaymentService.RECORD_TABLE} pr WHERE pr.payment_detail_id = pd.id) as payment_record_count
+                    FROM {PaymentService.TABLE_NAME} pd
+                    LEFT JOIN sales_orders so ON pd.sales_order_id = so.id
+                    LEFT JOIN pd_weighbills wb ON so.id = wb.sales_order_id
+                    WHERE {where_sql}
+                    ORDER BY pd.created_at DESC
+                    LIMIT %s OFFSET %s
+                """
+                
+                cur.execute(query_sql, tuple(params + [size, offset]))
+                rows = cur.fetchall()
+                
+                items = []
+                for row in rows:
+                    item = dict(row)
+                    item['status_name'] = PaymentStatus(item['status']).name if item.get('status') is not None else None
+                    item['created_at'] = str(item['created_at']) if item.get('created_at') else None
+                    item['weigh_date'] = str(item['weigh_date']) if item.get('weigh_date') else None
+                    items.append(item)
+                
+                # 查询该合同下的所有回款记录
+                records_sql = f"""
+                    SELECT 
+                        pr.id,
+                        pr.payment_detail_id,
+                        pr.payment_amount,
+                        pr.payment_stage,
+                        pr.payment_date,
+                        pr.payment_method,
+                        pr.transaction_no,
+                        pr.remark,
+                        pr.created_at
+                    FROM {PaymentService.RECORD_TABLE} pr
+                    INNER JOIN {PaymentService.TABLE_NAME} pd ON pr.payment_detail_id = pd.id
+                    WHERE pd.contract_no = %s
+                    ORDER BY pr.payment_date DESC, pr.created_at DESC
+                """
+                cur.execute(records_sql, (contract_no,))
+                records = cur.fetchall()
+                
+                payment_records = []
+                for record in records:
+                    rec = dict(record)
+                    rec['payment_stage_name'] = PaymentStage(rec['payment_stage']).name if rec.get('payment_stage') is not None else None
+                    rec['payment_date'] = str(rec['payment_date']) if rec.get('payment_date') else None
+                    rec['created_at'] = str(rec['created_at']) if rec.get('created_at') else None
+                    payment_records.append(rec)
+                
+                return {
+                    "contract_info": {
+                        "contract_no": contract_info["contract_no"],
+                        "smelter_name": contract_info["smelter_name"],
+                        "total_receivable": float(contract_info["contract_total"]),
+                        "total_received": float(contract_info["contract_paid"]),
+                        "total_unreceived": float(contract_info["contract_unpaid"]),
+                        "collection_rate": round(float(contract_info["contract_paid"]) / float(contract_info["contract_total"]) * 100, 2) if float(contract_info["contract_total"]) > 0 else 0
+                    },
+                    "total_orders": total,
+                    "page": page,
+                    "size": size,
+                    "orders": items,
+                    "payment_records": payment_records,
+                    "payment_record_count": len(payment_records)
+                }

@@ -200,6 +200,65 @@ class PaymentStatsResp(BaseModel):
     collection_rate: float
     status_breakdown: List[dict]
 
+class ContractShippingProgressResp(BaseModel):
+    """合同发运进度响应"""
+    contract_no: str
+    smelter_name: str
+    total_vehicles: int              # 总车数
+    planned_total_weight: float      # 计划总吨数
+    shipped_vehicles: int            # 已运车数
+    remaining_vehicles: int          # 剩余车数
+    shipped_weight: float            # 已运吨数
+    remaining_weight: float          # 剩余吨数
+    last_ship_date: Optional[str]
+    progress_rate: float             # 发运进度百分比
+
+
+class ContractPaymentSummaryResp(BaseModel):
+    """合同回款汇总响应"""
+    contract_no: str
+    smelter_name: str
+    order_count: int                 # 订单数量
+    total_receivable: float          # 应收总额
+    total_received: float            # 已收总额
+    total_unreceived: float          # 未收总额
+    collection_rate: float           # 回款率
+    contract_status: int             # 合同整体状态
+    contract_status_name: str
+    status_breakdown: dict           # 状态分布
+    last_payment_date: Optional[str]
+
+
+class ContractOrderDetail(BaseModel):
+    """合同下订单明细"""
+    id: int
+    sales_order_id: int
+    material_name: Optional[str]
+    unit_price: float
+    net_weight: float
+    total_amount: float
+    paid_amount: float
+    unpaid_amount: float
+    status: int
+    status_name: Optional[str]
+    remark: Optional[str]
+    created_at: Optional[str]
+    weigh_ticket_no: Optional[str]
+    weigh_date: Optional[str]
+    shipped_weight: Optional[float]
+    payment_record_count: int
+
+
+class ContractPaymentDetailResp(BaseModel):
+    """合同回款明细响应"""
+    contract_info: dict
+    total_orders: int
+    page: int
+    size: int
+    orders: List[ContractOrderDetail]
+    payment_records: List[PaymentRecordResp]
+    payment_record_count: int
+
 
 # ========== 路由定义 ==========
 
@@ -381,6 +440,123 @@ def delete_payment_detail(
     except Exception as e:
         logger.exception("删除收款明细异常")
         raise HTTPException(status_code=500, detail="删除失败")
+    
+
+@router.get("/contracts/shipping-progress", summary="合同发运进度列表", response_model=dict)
+def list_contract_shipping_progress(
+    contract_no: Optional[str] = Query(None, description="合同编号筛选"),
+    smelter_name: Optional[str] = Query(None, description="冶炼厂名称筛选"),
+    page: int = Query(1, ge=1, description="页码"),
+    size: int = Query(20, ge=1, le=100, description="每页数量"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    获取合同发运进度列表
+    
+    统计每个合同的发运情况：
+    - 总车数、总吨数（计划）
+    - 已运车数、已运吨数（根据磅单）
+    - 剩余车数、剩余吨数
+    - 发运进度百分比
+    
+    关联逻辑：合同 -> 销售订单 -> 磅单
+    """
+    check_finance_permission(current_user)
+    
+    try:
+        result = PaymentService.get_contract_shipping_progress(
+            contract_no=contract_no,
+            smelter_name=smelter_name,
+            page=page,
+            size=size
+        )
+        return {
+            "msg": "查询成功",
+            "data": result
+        }
+    except Exception as e:
+        logger.exception("查询合同发运进度异常")
+        raise HTTPException(status_code=500, detail="查询失败")
+
+
+# ========== 合同回款汇总接口 ==========
+
+@router.get("/contracts/payment-summary", summary="合同回款汇总列表", response_model=dict)
+def list_contract_payment_summary(
+    contract_no: Optional[str] = Query(None, description="合同编号筛选"),
+    smelter_name: Optional[str] = Query(None, description="冶炼厂名称筛选"),
+    status: Optional[int] = Query(None, ge=0, le=3, description="状态筛选"),
+    page: int = Query(1, ge=1, description="页码"),
+    size: int = Query(20, ge=1, le=100, description="每页数量"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    获取合同回款汇总列表（按合同编号分组统计）
+    
+    统计每个合同：
+    - 应收总额：合同应回款总金额
+    - 已收总额：已录入的回款金额
+    - 未收总额：剩余未回款金额
+    - 回款率：已收/应收
+    - 回款状态分布
+    
+    用于财务快速查看各合同的整体回款情况
+    """
+    check_finance_permission(current_user)
+    
+    try:
+        result = PaymentService.get_contract_payment_summary(
+            contract_no=contract_no,
+            smelter_name=smelter_name,
+            status=status,
+            page=page,
+            size=size
+        )
+        return {
+            "msg": "查询成功",
+            "data": result
+        }
+    except Exception as e:
+        logger.exception("查询合同回款汇总异常")
+        raise HTTPException(status_code=500, detail="查询失败")
+
+
+# ========== 合同回款明细接口 ==========
+
+@router.get("/contracts/{contract_no}/payment-details", summary="合同回款明细", response_model=dict)
+def get_contract_payment_details(
+    contract_no: str,
+    page: int = Query(1, ge=1, description="页码"),
+    size: int = Query(20, ge=1, le=100, description="每页数量"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    获取单个合同的回款明细
+    
+    展示内容：
+    - 合同基本信息（应收、已收、未收、回款率）
+    - 该合同下所有销售订单的收款明细
+    - 该合同下的所有回款记录
+    
+    用于查看单个合同的详细回款情况
+    """
+    check_finance_permission(current_user)
+    
+    try:
+        result = PaymentService.get_contract_payment_details(
+            contract_no=contract_no,
+            page=page,
+            size=size
+        )
+        return {
+            "msg": "查询成功",
+            "data": result
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("查询合同回款明细异常")
+        raise HTTPException(status_code=500, detail="查询失败")
 
 
 # ========== 回款录入接口（核心功能） ==========
