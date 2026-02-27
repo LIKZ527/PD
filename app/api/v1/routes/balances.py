@@ -106,6 +106,41 @@ class PaymentReceiptDetailOut(PaymentReceiptListOut):
     """支付回单详情（包含核销记录）"""
     ocr_raw_data: Optional[str] = None
     settlements: Optional[List[Dict]] = None
+
+class PayeeSummaryOut(BaseModel):
+    """收款人汇总响应模型"""
+    payee_name: str
+    driver_phone: Optional[str] = None
+    bill_count: int
+    total_payable: float
+    total_paid: float
+    total_balance: float
+    related_contracts: Optional[str] = None
+    related_vehicles: Optional[str] = None
+    first_bill_date: Optional[str] = None
+    last_bill_date: Optional[str] = None
+    pending_count: int
+    partial_count: int
+    status_summary: str
+
+
+class PayeeDetailSummary(BaseModel):
+    """收款人明细汇总"""
+    driver_name: str
+    driver_phone: Optional[str] = None
+    total_bills: int
+    total_payable: float
+    total_paid: float
+    total_balance: float
+
+
+class PayeeBalanceDetailOut(BalanceOut):
+    """收款人下的结余明细"""
+    weighbill_image: Optional[str] = None
+    weigh_date: Optional[str] = None
+    weigh_vehicle_no: Optional[str] = None
+    weigh_product_name: Optional[str] = None
+    weigh_net_weight: Optional[float] = None
 # ========== 路由 ==========
 
 @router.post("/generate")
@@ -371,6 +406,113 @@ async def list_payment_receipts(
     else:
         raise HTTPException(status_code=500, detail=result.get("error"))
 
+
+@router.get("/summary/by-payee", response_model=dict)
+async def list_balance_by_payee(
+        payee_name: Optional[str] = Query(None, description="精确收款人姓名"),
+        driver_phone: Optional[str] = Query(None, description="精确司机电话"),
+        fuzzy_keywords: Optional[str] = Query(None, description="模糊关键词（姓名/电话/车牌/合同号）"),
+        min_balance: Optional[float] = Query(0.01, description="最小结余金额，默认0.01"),
+        payment_status: Optional[int] = Query(None, description="0=待支付, 1=部分支付, 不传则显示有结余的"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        service: BalanceService = Depends(get_balance_service)
+):
+    """
+    按收款人汇总统计结余
+
+    用于：快速查看每个司机还有多少钱没付，涉及多少车货
+
+    示例返回：
+    {
+        "data": [
+            {
+                "payee_name": "张三",
+                "driver_phone": "13800138000",
+                "bill_count": 5,              // 5车货
+                "total_payable": 50000.00,     // 应付5万
+                "total_paid": 20000.00,        // 已付2万
+                "total_balance": 30000.00,     // 还剩3万没付
+                "related_contracts": "HT-001, HT-002",
+                "related_vehicles": "京A12345, 京B67890",
+                "status_summary": "3笔待支付,2笔部分支付"
+            }
+        ],
+        "summary": {
+            "total_payees": 10,    // 共10个收款人有结余
+            "total_balance": 150000.00  // 总待付金额15万
+        }
+    }
+    """
+    result = service.list_balance_summary_by_payee(
+        payee_name=payee_name,
+        driver_phone=driver_phone,
+        fuzzy_keywords=fuzzy_keywords,
+        min_balance=min_balance,
+        payment_status=payment_status,
+        page=page,
+        page_size=page_size
+    )
+
+    if result["success"]:
+        return result
+    else:
+        raise HTTPException(status_code=400, detail=result.get("error"))
+
+
+@router.get("/summary/by-payee/{payee_name}/details", response_model=dict)
+async def get_payee_balance_details(
+        payee_name: str,
+        driver_phone: Optional[str] = Query(None, description="司机电话（精确匹配）"),
+        payment_status: Optional[int] = Query(None, description="0=待支付, 1=部分支付"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        service: BalanceService = Depends(get_balance_service)
+):
+    """
+    查看指定收款人的具体结余明细列表
+
+    点击汇总行的"查看明细"后调用，显示该司机的所有具体账单
+    """
+    result = service.get_payee_balance_details(
+        payee_name=payee_name,
+        driver_phone=driver_phone,
+        payment_status=payment_status,
+        page=page,
+        page_size=page_size
+    )
+
+    if result["success"]:
+        return result
+    else:
+        raise HTTPException(status_code=404, detail=result.get("error"))
+
+
+@router.post("/summary/by-payee/{payee_name}/batch-verify", response_model=dict)
+async def batch_verify_by_payee(
+        payee_name: str,
+        receipt_id: int = Form(..., description="支付回单ID"),
+        driver_phone: Optional[str] = Form(None, description="司机电话"),
+        service: BalanceService = Depends(get_balance_service)
+):
+    """
+    按收款人批量核销支付
+
+    将一个支付回单的金额，自动分配到该收款人的多笔结余明细上
+    分配顺序：按创建时间从早到晚
+
+    适用场景：司机一次打款覆盖多车货的结余
+    """
+    result = service.batch_verify_by_payee(
+        payee_name=payee_name,
+        receipt_id=receipt_id,
+        driver_phone=driver_phone
+    )
+
+    if result["success"]:
+        return result
+    else:
+        raise HTTPException(status_code=400, detail=result.get("error"))
 @router.get("/{balance_id}", response_model=BalanceOut)
 async def get_balance(
         balance_id: int,
