@@ -706,6 +706,8 @@ class WeighbillService:
                         for key in ["weigh_date", "delivery_time", "created_at", "updated_at", "uploaded_at", "delivery_report_date"]:
                             if item.get(key):
                                 item[key] = str(item[key])
+                            # 增加联单费字段
+                            item["union_fee"] = 150 if item.get("delivery_has_delivery_order") == "无" else (item.get("delivery_service_fee") or 0)
                         data.append(item)
 
                     return {
