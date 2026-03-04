@@ -198,6 +198,40 @@ async def list_balances(
     )
 
 
+@router.get("/grouped", response_model=dict)
+async def list_balances_grouped(
+        exact_contract_no: Optional[str] = Query(None, description="精确合同编号"),
+        exact_driver_name: Optional[str] = Query(None, description="精确司机姓名"),
+        fuzzy_keywords: Optional[str] = Query(None, description="模糊关键词（空格分隔）"),
+        payment_status: Optional[int] = Query(None, description="0=待支付, 1=部分支付, 2=已结清"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        service: BalanceService = Depends(get_balance_service)
+):
+    """
+    查询结余明细列表（按报单分组，包含完整关联信息）
+
+    返回结构：
+    - 按报单ID分组，每组包含完整报单信息
+    - 每组包含结余统计（总应付/总已付/总结余/各状态笔数）
+    - 每组包含结余明细列表，每条明细包含：
+      * 结余基础信息（金额、状态、排期等）
+      * 关联磅单完整信息（重量、图片等）
+      * 关联支付回单列表（核销记录）
+      * 操作权限
+    """
+    result = service.list_balance_details_grouped(
+        exact_contract_no,
+        exact_driver_name,
+        fuzzy_keywords,
+        payment_status,
+        page,
+        page_size,
+    )
+    if result["success"]:
+        return result
+    else:
+        raise HTTPException(status_code=400, detail=result.get("error"))
 @router.post("/payment-receipts/ocr", response_model=PaymentReceiptOCRResponse)
 async def ocr_payment_receipt(
         file: UploadFile = File(..., description="支付回单图片"),

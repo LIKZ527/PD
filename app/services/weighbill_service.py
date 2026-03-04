@@ -666,9 +666,11 @@ class WeighbillService:
                                d.report_date, d.warehouse, d.target_factory_name,
                                d.driver_name, d.driver_phone, d.driver_id_card,
                                d.has_delivery_order, d.shipper, d.payee, d.reporter_name,
-                               d.service_fee
+                               d.service_fee,
+                               b.schedule_status
                         FROM pd_weighbills w
                         JOIN pd_deliveries d ON w.delivery_id = d.id
+                        LEFT JOIN pd_balance_details b ON w.id = b.weighbill_id
                         WHERE {weighbill_sql}
                         ORDER BY w.delivery_id, w.product_name
                     """, tuple(weighbill_params))
@@ -778,7 +780,7 @@ class WeighbillService:
     # ========== 排款日期 ==========
 
     def set_payment_schedule_date(self, weighbill_id: int, payment_schedule_date: str) -> Dict[str, Any]:
-        """设置磅单排款日期"""
+        """设置磅单排款日期，同时更新结余明细的排期状态"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -786,16 +788,24 @@ class WeighbillService:
                     if not cur.fetchone():
                         return {"success": False, "error": "磅单不存在"}
 
+                    # 更新磅单排款日期
                     cur.execute("""
                         UPDATE pd_weighbills 
                         SET payment_schedule_date = %s, updated_at = NOW()
                         WHERE id = %s
                     """, (payment_schedule_date, weighbill_id))
 
+                    # 同时更新结余明细的排期状态和排款日期
+                    cur.execute("""
+                        UPDATE pd_balance_details 
+                        SET schedule_date = %s, schedule_status = 1, updated_at = NOW()
+                        WHERE weighbill_id = %s
+                    """, (payment_schedule_date, weighbill_id))
+
                     return {
                         "success": True,
                         "message": "排款日期设置成功",
-                        "data": {"id": weighbill_id, "payment_schedule_date": payment_schedule_date}
+                        "data": {"id": weighbill_id, "payment_schedule_date": payment_schedule_date, "schedule_status": 1}
                     }
 
         except Exception as e:

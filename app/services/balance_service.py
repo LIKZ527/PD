@@ -1246,6 +1246,365 @@ class BalanceService:
             logger.error(f"按收款人汇总查询失败: {e}")
             return {"success": False, "error": str(e), "data": [], "total": 0}
 
+    def list_balance_details_grouped(self,
+                                     exact_contract_no: str = None,
+                                     exact_driver_name: str = None,
+                                     fuzzy_keywords: str = None,
+                                     payment_status: int = None,
+                                     page: int = 1,
+                                     page_size: int = 20) -> Dict[str, Any]:
+        """
+        查询结余明细列表（按报单分组，包含完整关联信息）
+        """
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    # 构建WHERE条件
+                    conditions = ["1=1"]
+                    params = []
+
+                    if exact_contract_no:
+                        conditions.append("b.contract_no = %s")
+                        params.append(exact_contract_no)
+                    if exact_driver_name:
+                        conditions.append("b.driver_name = %s")
+                        params.append(exact_driver_name)
+                    if fuzzy_keywords:
+                        tokens = [t for t in fuzzy_keywords.split() if t]
+                        or_clauses = []
+                        for token in tokens:
+                            like = f"%{token}%"
+                            or_clauses.append(
+                                "(b.contract_no LIKE %s OR b.driver_name LIKE %s OR b.driver_phone LIKE %s OR b.vehicle_no LIKE %s)"
+                            )
+                            params.extend([like, like, like, like])
+                        if or_clauses:
+                            conditions.append("(" + " OR ".join(or_clauses) + ")")
+                    if payment_status is not None:
+                        conditions.append("b.payment_status = %s")
+                        params.append(payment_status)
+
+                    where_sql = " AND ".join(conditions)
+
+                    # 查询报单分组总数（去重delivery_id）
+                    cur.execute(f"""
+                        SELECT COUNT(DISTINCT b.delivery_id) 
+                        FROM pd_balance_details b
+                        WHERE {where_sql}
+                    """, tuple(params))
+                    total = cur.fetchone()[0]
+
+                    # 分页查询报单ID列表
+                    offset = (page - 1) * page_size
+                    cur.execute(f"""
+                        SELECT DISTINCT b.delivery_id, b.created_at
+                        FROM pd_balance_details b
+                        WHERE {where_sql}
+                        ORDER BY b.created_at DESC
+                        LIMIT %s OFFSET %s
+                    """, tuple(params + [page_size, offset]))
+                    delivery_ids = [row[0] for row in cur.fetchall()]
+
+                    if not delivery_ids:
+                        return {
+                            "success": True,
+                            "data": [],
+                            "total": 0,
+                            "page": page,
+                            "page_size": page_size
+                        }
+
+                    # 查询报单详细信息
+                    format_ids = ','.join(['%s'] * len(delivery_ids))
+                    cur.execute(f"""
+                        SELECT d.*,
+                               (SELECT COUNT(*) FROM pd_balance_details WHERE delivery_id = d.id) as total_items,
+                               (SELECT COUNT(*) FROM pd_balance_details WHERE delivery_id = d.id AND payment_status = 0) as pending_items,
+                               (SELECT COUNT(*) FROM pd_balance_details WHERE delivery_id = d.id AND payment_status = 1) as partial_items,
+                               (SELECT COUNT(*) FROM pd_balance_details WHERE delivery_id = d.id AND payment_status = 2) as settled_items,
+                               (SELECT COALESCE(SUM(payable_amount), 0) FROM pd_balance_details WHERE delivery_id = d.id) as total_payable,
+                               (SELECT COALESCE(SUM(paid_amount), 0) FROM pd_balance_details WHERE delivery_id = d.id) as total_paid,
+                               (SELECT COALESCE(SUM(balance_amount), 0) FROM pd_balance_details WHERE delivery_id = d.id) as total_balance
+                        FROM pd_deliveries d
+                        WHERE d.id IN ({format_ids})
+                        ORDER BY d.created_at DESC
+                    """, tuple(delivery_ids))
+
+                    delivery_columns = [desc[0] for desc in cur.description]
+                    delivery_rows = cur.fetchall()
+
+                    # 查询这些报单的所有结余明细（含关联信息）
+                    cur.execute(f"""
+                        SELECT 
+                            b.*,
+                            w.id as wb_id, w.weigh_date, w.delivery_time, w.weigh_ticket_no,
+                            w.contract_no as wb_contract_no, w.vehicle_no as wb_vehicle_no,
+                            w.product_name as wb_product_name, w.gross_weight, w.tare_weight,
+                            w.net_weight, w.unit_price as wb_unit_price, w.total_amount as wb_total_amount,
+                            w.weighbill_image, w.upload_status as wb_upload_status,
+                            w.ocr_status, w.is_manual_corrected, w.payment_schedule_date as wb_payment_schedule_date,
+                            w.uploader_id as wb_uploader_id, w.uploader_name as wb_uploader_name,
+                            w.uploaded_at as wb_uploaded_at, w.created_at as wb_created_at, w.updated_at as wb_updated_at
+                        FROM pd_balance_details b
+                        LEFT JOIN pd_weighbills w ON b.weighbill_id = w.id
+                        WHERE b.delivery_id IN ({format_ids})
+                        ORDER BY b.delivery_id, b.created_at
+                    """, tuple(delivery_ids))
+
+                    balance_columns = [desc[0] for desc in cur.description]
+                    balance_rows = cur.fetchall()
+
+                    # 查询结余明细关联的回单信息
+                    balance_ids = [row[0] for row in balance_rows]  # b.id 是第一列
+                    receipts_map = {}
+                    if balance_ids:
+                        format_balance_ids = ','.join(['%s'] * len(balance_ids))
+                        cur.execute(f"""
+                            SELECT 
+                                rs.balance_id,
+                                pr.id as receipt_id, pr.receipt_no, pr.payment_date, pr.payment_time,
+                                pr.payer_name, pr.payer_account, pr.payee_name, pr.payee_account,
+                                pr.amount, pr.fee, pr.total_amount, pr.bank_name, pr.payee_bank_name,
+                                pr.remark, pr.ocr_status, pr.is_manual_corrected, pr.receipt_image,
+                                pr.created_at as receipt_created_at,
+                                rs.settled_amount
+                            FROM pd_receipt_settlements rs
+                            JOIN pd_payment_receipts pr ON rs.receipt_id = pr.id
+                            WHERE rs.balance_id IN ({format_balance_ids})
+                            ORDER BY rs.balance_id, pr.payment_date DESC
+                        """, tuple(balance_ids))
+
+                        for row in cur.fetchall():
+                            balance_id = row[0]
+                            if balance_id not in receipts_map:
+                                receipts_map[balance_id] = []
+                            receipts_map[balance_id].append({
+                                'receipt_id': row[1],
+                                'receipt_no': row[2],
+                                'payment_date': str(row[3]) if row[3] else None,
+                                'payment_time': str(row[4]) if row[4] else None,
+                                'payer_name': row[5],
+                                'payer_account': row[6],
+                                'payee_name': row[7],
+                                'payee_account': row[8],
+                                'amount': float(row[9]) if row[9] else 0,
+                                'fee': float(row[10]) if row[10] else 0,
+                                'total_amount': float(row[11]) if row[11] else 0,
+                                'bank_name': row[12],
+                                'payee_bank_name': row[13],
+                                'remark': row[14],
+                                'ocr_status': row[15],
+                                'ocr_status_label': {0: "待确认", 1: "已确认", 2: "已核销"}.get(row[15], "未知"),
+                                'is_manual_corrected': row[16],
+                                'receipt_image': row[17],
+                                'created_at': str(row[18]) if row[18] else None,
+                                'settled_amount': float(row[19]) if row[19] else 0
+                            })
+
+                    # 组装结余明细数据
+                    balance_map = {}  # delivery_id -> [balance_items]
+                    status_map = {0: "待支付", 1: "部分支付", 2: "已结清"}
+                    payout_map = {0: "待打款", 1: "已打款"}
+                    schedule_map = {0: "待排期", 1: "已排期"}
+
+                    for row in balance_rows:
+                        item = dict(zip(balance_columns, row))
+
+                        # 转换时间字段
+                        for key in ['created_at', 'updated_at', 'schedule_date']:
+                            if item.get(key):
+                                item[key] = str(item[key])
+
+                        # 转换金额字段
+                        for key in ['payable_amount', 'paid_amount', 'balance_amount', 'purchase_unit_price']:
+                            if item.get(key) is not None:
+                                item[key] = float(item[key])
+
+                        # 状态名称
+                        item['payment_status_name'] = status_map.get(item.get('payment_status'), "未知")
+                        item['payout_status_name'] = payout_map.get(item.get('payout_status'), "未知")
+                        item['schedule_status_name'] = schedule_map.get(item.get('schedule_status'), "未知")
+
+                        # 构建磅单对象
+                        weighbill = None
+                        if item.get('wb_id'):
+                            weighbill = {
+                                'id': item['wb_id'],
+                                'weigh_date': str(item['weigh_date']) if item.get('weigh_date') else None,
+                                'delivery_time': str(item['delivery_time']) if item.get('delivery_time') else None,
+                                'weigh_ticket_no': item['weigh_ticket_no'],
+                                'contract_no': item['wb_contract_no'],
+                                'vehicle_no': item['wb_vehicle_no'],
+                                'product_name': item['wb_product_name'],
+                                'gross_weight': float(item['gross_weight']) if item.get('gross_weight') else None,
+                                'tare_weight': float(item['tare_weight']) if item.get('tare_weight') else None,
+                                'net_weight': float(item['net_weight']) if item.get('net_weight') else None,
+                                'unit_price': float(item['wb_unit_price']) if item.get('wb_unit_price') else None,
+                                'total_amount': float(item['wb_total_amount']) if item.get('wb_total_amount') else None,
+                                'weighbill_image': item['weighbill_image'],
+                                'upload_status': item['wb_upload_status'],
+                                'ocr_status': item['ocr_status'],
+                                'is_manual_corrected': item['is_manual_corrected'],
+                                'payment_schedule_date': str(item['wb_payment_schedule_date']) if item.get(
+                                    'wb_payment_schedule_date') else None,
+                                'uploader_id': item['wb_uploader_id'],
+                                'uploader_name': item['wb_uploader_name'],
+                                'uploaded_at': str(item['wb_uploaded_at']) if item.get('wb_uploaded_at') else None,
+                                'created_at': str(item['wb_created_at']) if item.get('wb_created_at') else None,
+                                'updated_at': str(item['wb_updated_at']) if item.get('wb_updated_at') else None
+                            }
+
+                        # 获取关联回单
+                        balance_id = item['id']
+                        payment_receipts = receipts_map.get(balance_id, [])
+
+                        # 操作权限
+                        balance_amount = item.get('balance_amount', 0)
+                        schedule_status = item.get('schedule_status', 0)
+                        receipt_count = len(payment_receipts)
+
+                        operations = {
+                            'can_verify': balance_amount > 0,
+                            'can_batch_verify': balance_amount > 0,
+                            'can_schedule': schedule_status == 0,
+                            'can_modify_schedule': schedule_status == 1,
+                            'can_view_receipts': receipt_count > 0,
+                            'can_view_weighbill': item.get('wb_id') is not None
+                        }
+
+                        # 构建最终结余对象
+                        balance_item = {
+                            'id': item['id'],
+                            'contract_no': item['contract_no'],
+                            'delivery_id': item['delivery_id'],
+                            'weighbill_id': item['weighbill_id'],
+                            'driver_name': item['driver_name'],
+                            'driver_phone': item['driver_phone'],
+                            'vehicle_no': item['vehicle_no'],
+                            'payee_id': item['payee_id'],
+                            'payee_name': item['payee_name'],
+                            'payee_account': item['payee_account'],
+                            'purchase_unit_price': item.get('purchase_unit_price'),
+                            'payable_amount': item['payable_amount'],
+                            'paid_amount': item['paid_amount'],
+                            'balance_amount': item['balance_amount'],
+                            'payment_status': item['payment_status'],
+                            'payment_status_name': item['payment_status_name'],
+                            'payout_status': item['payout_status'],
+                            'payout_status_name': item['payout_status_name'],
+                            'schedule_date': item['schedule_date'],
+                            'schedule_status': item['schedule_status'],
+                            'schedule_status_name': item['schedule_status_name'],
+                            'created_at': item['created_at'],
+                            'updated_at': item['updated_at'],
+                            'weighbill': weighbill,
+                            'payment_receipts': payment_receipts,
+                            'receipt_count': receipt_count,
+                            'operations': operations
+                        }
+
+                        delivery_id = item['delivery_id']
+                        if delivery_id not in balance_map:
+                            balance_map[delivery_id] = []
+                        balance_map[delivery_id].append(balance_item)
+
+                    # 组装最终结果
+                    result_data = []
+                    for row in delivery_rows:
+                        delivery = dict(zip(delivery_columns, row))
+
+                        # 转换时间字段
+                        for key in ['report_date', 'created_at', 'updated_at', 'uploaded_at']:
+                            if delivery.get(key):
+                                delivery[key] = str(delivery[key])
+
+                        # 转换金额字段
+                        for key in ['quantity', 'service_fee', 'contract_unit_price', 'total_amount',
+                                    'total_payable', 'total_paid', 'total_balance']:
+                            if delivery.get(key) is not None:
+                                delivery[key] = float(delivery[key])
+
+                        # 转换整数字段
+                        for key in ['total_items', 'pending_items', 'partial_items', 'settled_items']:
+                            if delivery.get(key) is not None:
+                                delivery[key] = int(delivery[key])
+
+                        # 解析品种列表
+                        if delivery.get('products'):
+                            delivery['products'] = [p.strip() for p in delivery['products'].split(',') if p.strip()]
+                        else:
+                            delivery['products'] = [delivery.get('product_name')] if delivery.get(
+                                'product_name') else []
+
+                        # 显示字段转换
+                        delivery['has_delivery_order_display'] = '是' if delivery.get(
+                            'has_delivery_order') == '有' else '否'
+                        delivery['upload_status_display'] = '是' if delivery.get('upload_status') == '已上传' else '否'
+
+                        delivery_id = delivery['id']
+                        balance_items = balance_map.get(delivery_id, [])
+
+                        result_data.append({
+                            # 报单基础信息
+                            'delivery_id': delivery_id,
+                            'report_date': delivery.get('report_date'),
+                            'warehouse': delivery.get('warehouse'),
+                            'target_factory_id': delivery.get('target_factory_id'),
+                            'target_factory_name': delivery.get('target_factory_name'),
+                            'product_name': delivery.get('product_name'),
+                            'products': delivery.get('products'),
+                            'quantity': delivery.get('quantity'),
+                            'vehicle_no': delivery.get('vehicle_no'),
+                            'driver_name': delivery.get('driver_name'),
+                            'driver_phone': delivery.get('driver_phone'),
+                            'driver_id_card': delivery.get('driver_id_card'),
+                            'has_delivery_order': delivery.get('has_delivery_order'),
+                            'has_delivery_order_display': delivery.get('has_delivery_order_display'),
+                            'delivery_order_image': delivery.get('delivery_order_image'),
+                            'upload_status': delivery.get('upload_status'),
+                            'upload_status_display': delivery.get('upload_status_display'),
+                            'source_type': delivery.get('source_type'),
+                            'shipper': delivery.get('shipper'),
+                            'reporter_id': delivery.get('reporter_id'),
+                            'reporter_name': delivery.get('reporter_name'),
+                            'payee': delivery.get('payee'),
+                            'service_fee': delivery.get('service_fee'),
+                            'contract_no': delivery.get('contract_no'),
+                            'contract_unit_price': delivery.get('contract_unit_price'),
+                            'total_amount': delivery.get('total_amount'),
+                            'status': delivery.get('status'),
+                            'uploader_id': delivery.get('uploader_id'),
+                            'uploader_name': delivery.get('uploader_name'),
+                            'uploaded_at': delivery.get('uploaded_at'),
+                            'created_at': delivery.get('created_at'),
+                            'updated_at': delivery.get('updated_at'),
+
+                            # 结余统计
+                            'balance_summary': {
+                                'total_items': delivery.get('total_items', 0),
+                                'pending_items': delivery.get('pending_items', 0),
+                                'partial_items': delivery.get('partial_items', 0),
+                                'settled_items': delivery.get('settled_items', 0),
+                                'total_payable': delivery.get('total_payable', 0),
+                                'total_paid': delivery.get('total_paid', 0),
+                                'total_balance': delivery.get('total_balance', 0)
+                            },
+
+                            # 结余明细列表
+                            'balance_items': balance_items
+                        })
+
+                    return {
+                        "success": True,
+                        "data": result_data,
+                        "total": total,
+                        "page": page,
+                        "page_size": page_size
+                    }
+
+        except Exception as e:
+            logger.error(f"查询分组结余列表失败: {e}")
+            return {"success": False, "error": str(e), "data": [], "total": 0}
     def get_payee_balance_details(
             self,
             payee_name: str,
