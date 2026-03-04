@@ -886,7 +886,7 @@ class BalanceService:
                         SELECT 
                             b.*,
                             w.weighbill_image,
-                            d.payee as payee_name,
+                            d.payee as delivery_payee_name,
                             (SELECT COUNT(*) FROM pd_receipt_settlements rs 
                              JOIN pd_payment_receipts pr ON rs.receipt_id = pr.id 
                              WHERE rs.balance_id = b.id) as receipt_count
@@ -901,14 +901,18 @@ class BalanceService:
                     columns = [desc[0] for desc in cur.description]
                     data = []
                     status_map = {0: "待支付", 1: "部分支付", 2: "已结清"}
+                    payout_map = {0: "待打款", 1: "已打款"}
+                    schedule_map = {0: "待排期", 1: "已排期"}
 
                     for row in cur.fetchall():
                         item = dict(zip(columns, row))
-                        for key in ['created_at', 'updated_at']:
+                        for key in ['created_at', 'updated_at', 'schedule_date']:
                             if item.get(key):
                                 item[key] = str(item[key])
                         # 添加状态名称
                         item['payment_status_name'] = status_map.get(item.get('payment_status'), "未知")
+                        item['payout_status_name'] = payout_map.get(item.get('payout_status'), "未知")
+                        item['schedule_status_name'] = schedule_map.get(item.get('schedule_status'), "未知")
                         data.append(item)
 
                     return {

@@ -91,6 +91,36 @@ class PaymentService:
     RECORD_TABLE = "pd_payment_records"
 
     @staticmethod
+    def _get_collection_status_name(
+        smelter_name: Optional[str],
+        arrival_paid_amount: Optional[float],
+        final_paid_amount: Optional[float],
+        paid_amount: Optional[float],
+        collection_status: Optional[int]
+    ) -> str:
+        name = smelter_name or ""
+        arrival_paid = float(arrival_paid_amount or 0)
+        final_paid = float(final_paid_amount or 0)
+        paid = float(paid_amount or 0)
+
+        if "金利" in name:
+            if final_paid > 0:
+                return "已回款"
+            if arrival_paid > 0:
+                return "已回首笔待回尾款"
+            return "待回款"
+
+        if "豫光" in name:
+            return "已回款" if paid > 0 else "待回款"
+
+        collection_map = {
+            0: "待回款",
+            1: "已回首笔待回尾款",
+            2: "已回款"
+        }
+        return collection_map.get(collection_status, "未知")
+
+    @staticmethod
     def ensure_tables_exist():
         """
         确保收款明细表和回款记录表存在
@@ -399,6 +429,11 @@ class PaymentService:
                         pd.total_amount,
                         pd.paid_amount,
                         pd.unpaid_amount,
+                        pd.arrival_payment_amount,
+                        pd.final_payment_amount,
+                        pd.arrival_paid_amount,
+                        pd.final_paid_amount,
+                        pd.collection_status,
                         pd.status,
                         pd.remark,
                         pd.created_by,
@@ -436,6 +471,7 @@ class PaymentService:
                         d.driver_id_card,
                         d.has_delivery_order,
                         d.delivery_order_image,
+                        d.upload_status as delivery_upload_status,
                         d.source_type,
                         d.shipper,
                         d.payee,
@@ -446,10 +482,11 @@ class PaymentService:
                         d.status as delivery_status,
                         d.uploader_id as delivery_uploader_id,
                         d.uploader_name as delivery_uploader_name,
-                        d.uploaded_at as delivery_uploaded_at
+                        d.uploaded_at as delivery_uploaded_at,
+                        (SELECT MAX(pr.payment_date) FROM pd_payment_records pr WHERE pr.payment_detail_id = pd.id) as last_payment_date
                     FROM {PaymentService.TABLE_NAME} pd
-                    LEFT JOIN pd_weighbills wb ON pd.sales_order_id = wb.id
-                    LEFT JOIN pd_deliveries d ON wb.delivery_id = d.id
+                    LEFT JOIN pd_deliveries d ON d.id = COALESCE(pd.delivery_id, pd.sales_order_id)
+                    LEFT JOIN pd_weighbills wb ON wb.delivery_id = d.id
                     WHERE {where_sql}
                     ORDER BY pd.created_at DESC
                     LIMIT %s OFFSET %s
@@ -471,6 +508,16 @@ class PaymentService:
                     for field in time_fields:
                         if item.get(field):
                             item[field] = str(item[field])
+                    if item.get('last_payment_date'):
+                        item['last_payment_date'] = str(item['last_payment_date'])
+
+                    item['collection_status_name'] = PaymentService._get_collection_status_name(
+                        item.get('smelter_name'),
+                        item.get('arrival_paid_amount'),
+                        item.get('final_paid_amount'),
+                        item.get('paid_amount'),
+                        item.get('collection_status')
+                    )
 
                     # 添加状态名称
                     item['status_name'] = PaymentStatus(item['status']).name if item.get('status') is not None else None
@@ -529,6 +576,14 @@ class PaymentService:
                     if detail.get(field):
                         detail[field] = str(detail[field])
                 
+                detail['collection_status_name'] = PaymentService._get_collection_status_name(
+                    detail.get('smelter_name'),
+                    detail.get('arrival_paid_amount'),
+                    detail.get('final_paid_amount'),
+                    detail.get('paid_amount'),
+                    detail.get('collection_status')
+                )
+
                 # 查询关联的磅单和销售台账信息（复用list_payment_details的关联逻辑）
                 query_sql = f"""
                     SELECT 
@@ -562,6 +617,7 @@ class PaymentService:
                         d.driver_id_card,
                         d.has_delivery_order,
                         d.delivery_order_image,
+                        d.upload_status as delivery_upload_status,
                         d.source_type,
                         d.shipper,
                         d.payee,
@@ -574,9 +630,8 @@ class PaymentService:
                         d.uploader_name as delivery_uploader_name,
                         d.uploaded_at as delivery_uploaded_at
                     FROM {PaymentService.TABLE_NAME} pd
-                    LEFT JOIN sales_orders so ON pd.sales_order_id = so.id
-                    LEFT JOIN pd_weighbills wb ON so.id = wb.sales_order_id
-                    LEFT JOIN pd_deliveries d ON wb.delivery_id = d.id
+                    LEFT JOIN pd_deliveries d ON d.id = COALESCE(pd.delivery_id, pd.sales_order_id)
+                    LEFT JOIN pd_weighbills wb ON wb.delivery_id = d.id
                     WHERE pd.id = %s
                     LIMIT 1
                 """
@@ -598,6 +653,13 @@ class PaymentService:
                         extra_info['delivery_fee'] = 150.0
                     else:
                         extra_info['delivery_fee'] = float(extra_info.get('service_fee') or 0)
+
+                    collection_map = {
+                        0: "待回款",
+                        1: "已回首笔待回尾款",
+                        2: "已回款"
+                    }
+                    extra_info['collection_status_name'] = collection_map.get(detail.get('collection_status'), "未知")
                     
                     detail.update(extra_info)
                 
@@ -813,8 +875,8 @@ class PaymentService:
                         SUM(pd.net_weight) - SUM(CASE WHEN wb.id IS NOT NULL THEN wb.net_weight ELSE 0 END) as remaining_weight,
                         MAX(wb.weigh_date) as last_ship_date
                     FROM {PaymentService.TABLE_NAME} pd
-                    LEFT JOIN sales_orders so ON pd.sales_order_id = so.id
-                    LEFT JOIN pd_weighbills wb ON so.id = wb.sales_order_id
+                    LEFT JOIN pd_deliveries d ON d.id = COALESCE(pd.delivery_id, pd.sales_order_id)
+                    LEFT JOIN pd_weighbills wb ON wb.delivery_id = d.id
                     WHERE {where_sql}
                     GROUP BY pd.contract_no, pd.smelter_name
                     ORDER BY MAX(pd.created_at) DESC
@@ -1031,6 +1093,11 @@ class PaymentService:
                         pd.total_amount,
                         pd.paid_amount,
                         pd.unpaid_amount,
+                        pd.arrival_payment_amount,
+                        pd.final_payment_amount,
+                        pd.arrival_paid_amount,
+                        pd.final_paid_amount,
+                        pd.collection_status,
                         pd.status,
                         pd.remark,
                         pd.created_at,
@@ -1039,8 +1106,8 @@ class PaymentService:
                         wb.net_weight as shipped_weight,
                         (SELECT COUNT(*) FROM {PaymentService.RECORD_TABLE} pr WHERE pr.payment_detail_id = pd.id) as payment_record_count
                     FROM {PaymentService.TABLE_NAME} pd
-                    LEFT JOIN sales_orders so ON pd.sales_order_id = so.id
-                    LEFT JOIN pd_weighbills wb ON so.id = wb.sales_order_id
+                    LEFT JOIN pd_deliveries d ON d.id = COALESCE(pd.delivery_id, pd.sales_order_id)
+                    LEFT JOIN pd_weighbills wb ON wb.delivery_id = d.id
                     WHERE {where_sql}
                     ORDER BY pd.created_at DESC
                     LIMIT %s OFFSET %s
@@ -1055,6 +1122,13 @@ class PaymentService:
                     item['status_name'] = PaymentStatus(item['status']).name if item.get('status') is not None else None
                     item['created_at'] = str(item['created_at']) if item.get('created_at') else None
                     item['weigh_date'] = str(item['weigh_date']) if item.get('weigh_date') else None
+                    item['collection_status_name'] = PaymentService._get_collection_status_name(
+                        contract_info.get('smelter_name'),
+                        item.get('arrival_paid_amount'),
+                        item.get('final_paid_amount'),
+                        item.get('paid_amount'),
+                        item.get('collection_status')
+                    )
                     items.append(item)
                 
                 # 查询该合同下的所有回款记录
