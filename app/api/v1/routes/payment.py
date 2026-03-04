@@ -110,6 +110,8 @@ class PaymentResp(BaseModel):
     arrival_paid_amount: Optional[float] = None
     final_paid_amount: Optional[float] = None
     collection_status: Optional[int] = None
+    collection_status_name: Optional[str] = None
+    last_payment_date: Optional[str] = None
     status: int
     status_name: str
     remark: Optional[str]
@@ -149,6 +151,7 @@ class PaymentResp(BaseModel):
     driver_id_card: Optional[str] = None
     has_delivery_order: Optional[str] = None
     delivery_order_image: Optional[str] = None
+    delivery_upload_status: Optional[str] = None
     source_type: Optional[str] = None
     shipper: Optional[str] = None
     payee: Optional[str] = None
