@@ -299,7 +299,12 @@ class ContractPaymentDetailResp(BaseModel):
     payment_records: List[PaymentRecordResp]
     payment_record_count: int
 
-
+class UpdateCollectionReq(BaseModel):
+    """编辑回款请求"""
+    arrival_paid_amount: Optional[float] = Field(None, ge=0, description="已回款首笔金额")
+    final_paid_amount: Optional[float] = Field(None, ge=0, description="已回款尾款金额")
+    payment_date: Optional[str] = Field(None, description="回款日期，格式：YYYY-MM-DD")
+    remark: Optional[str] = Field(None, description="备注")
 # ========== 路由定义 ==========
 
 router = APIRouter(tags=["PD收款明细管理"])
@@ -373,31 +378,38 @@ def create_payment_detail(
         raise HTTPException(status_code=500, detail="创建收款明细失败")
 
 
-@router.get("/details", summary="回款列表（打款信息列表）", response_model=dict)
+@router.get("/details", summary="回款信息列表", response_model=dict)
 def list_payment_details(
-    page: int = Query(1, ge=1, description="页码"),
-    size: int = Query(20, ge=1, le=100, description="每页数量"),
-    status: Optional[int] = Query(None, ge=0, le=3, description="回款明细状态筛选"),
-    smelter_name: Optional[str] = Query(None, description="冶炼厂名称"),
-    contract_no: Optional[str] = Query(None, description="合同编号"),
-    start_date: Optional[date] = Query(None, description="开始日期"),
-    end_date: Optional[date] = Query(None, description="结束日期"),
-    keyword: Optional[str] = Query(None, description="关键词搜索"),
-    # 新增筛选参数
-    is_paid: Optional[int] = Query(None, ge=0, le=1, description="回款状态筛选：0-未回款, 1-已回款"),
-    is_paid_out: Optional[int] = Query(None, ge=0, le=1, description="打款状态筛选：0-待打款, 1-已打款"),
-    payment_schedule_date: Optional[str] = Query(None, description="排期日期筛选"),
-    current_user: dict = Depends(get_current_user)
+        page: int = Query(1, ge=1, description="页码"),
+        size: int = Query(20, ge=1, le=100, description="每页数量"),
+        # 原有筛选
+        status: Optional[int] = Query(None, ge=0, le=3, description="回款明细状态"),
+        smelter_name: Optional[str] = Query(None, description="冶炼厂名称"),
+        contract_no: Optional[str] = Query(None, description="合同编号"),
+        start_date: Optional[date] = Query(None, description="开始日期"),
+        end_date: Optional[date] = Query(None, description="结束日期"),
+        keyword: Optional[str] = Query(None, description="关键词搜索"),
+        # 新增列表专用筛选
+        report_date: Optional[str] = Query(None, description="报单日期"),
+        driver_name: Optional[str] = Query(None, description="司机姓名"),
+        vehicle_no: Optional[str] = Query(None, description="车号"),
+        weigh_date: Optional[str] = Query(None, description="磅单日期"),
+        payment_date: Optional[str] = Query(None, description="回款日期"),
+        collection_status: Optional[int] = Query(None, ge=0, le=2,
+                                                 description="回款状态：0-待回款, 1-已回首笔, 2-已回款"),
+        current_user: dict = Depends(get_current_user)
 ):
     """
-    获取回款列表（打款信息列表）
-    
-    按排期日期分组展示，包含三行信息：
-    - 第一行：排期日期、合同编号、报单日期、报送冶炼厂、司机电话、司机姓名、车号、身份证号、品种、是否自带联单、是否上传联单、报单人/发货人
-    - 第二行：磅单日期、过磅单号、净重、采购单价、联单费、应打款金额、已打款金额、收款人、收款人账号
-    - 第三行：打款状态、回款状态、操作
-    
-    支持按回款状态、打款状态、排期日期筛选
+    回款信息列表（按磅单平铺）
+
+    表头三行：
+    - 第一行：合同编号、报单日期、报送冶炼厂、司机电话、司机姓名、车号、品种、是否自带联单、是否上传联单、报单人/发货人、收款人
+    - 第二行：磅单日期、过磅单号、净重、销售单价、应回款首笔金额、应回款尾款金额、已回款首笔金额、已回款尾款金额、回款日期
+    - 第三行：回款状态、备注、创建/更新时间、操作
+
+    只显示已上传磅单的数据
+
+    查询条件：合同编号、报单日期、司机姓名、车号、磅单日期、回款日期、回款状态
     """
     check_finance_permission(current_user)
 
@@ -411,15 +423,61 @@ def list_payment_details(
             start_date=start_date,
             end_date=end_date,
             keyword=keyword,
-            is_paid=is_paid,
-            is_paid_out=is_paid_out,
-            payment_schedule_date=payment_schedule_date
+            report_date=report_date,
+            driver_name=driver_name,
+            vehicle_no=vehicle_no,
+            weigh_date=weigh_date,
+            collection_status=collection_status
         )
         return result
 
     except Exception as e:
         logger.exception("查询回款列表异常")
         raise HTTPException(status_code=500, detail="查询失败")
+
+
+@router.put("/details/{payment_id}/collection", summary="编辑回款信息", response_model=dict)
+def update_collection_payment(
+        payment_id: int,
+        body: UpdateCollectionReq,
+        current_user: dict = Depends(get_current_user)
+):
+    """
+    编辑回款信息
+    - payment_id填写实际为payment_detail_id
+    填写已回款首笔金额、已回款尾款金额，自动：
+    - 计算 paid_amount = 首笔 + 尾款
+    - 计算 unpaid_amount = 总额 - 已付
+    - 判断回款状态（金利分阶段，豫光一次性）
+    - 同步更新回款记录
+
+    金利：分别编辑首笔和尾款
+    豫光：只编辑首笔金额（尾款固定为0）
+    """
+    check_finance_permission(current_user)
+
+    try:
+        result = PaymentService.update_collection_payment(
+            payment_id=payment_id,
+            arrival_paid_amount=body.arrival_paid_amount,
+            final_paid_amount=body.final_paid_amount,
+            payment_date=body.payment_date,
+            remark=body.remark,
+            updated_by=current_user.get("id")
+        )
+
+        return {
+            "success": True,
+            "msg": "回款更新成功",
+            "data": result
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("编辑回款异常")
+        raise HTTPException(status_code=500, detail="更新失败")
+
 
 @router.get("/details/{payment_id}", summary="收款明细详情", response_model=PaymentDetailResp)
 def get_payment_detail(
@@ -696,3 +754,77 @@ def record_payment(
     except Exception as e:
         logger.exception("录入回款记录异常")
         raise HTTPException(status_code=500, detail="录入失败")
+
+
+# 在 payment.py 中添加
+
+class CreatePaymentByWeighbillReq(BaseModel):
+    """根据磅单创建回款信息"""
+    weighbill_id: int = Field(..., description="磅单ID")
+    contract_no: str = Field(..., description="合同编号")
+    smelter_name: str = Field(..., description="冶炼厂名称")
+
+
+@router.post("/details/create-by-weighbill", summary="根据磅单手动创建回款信息", response_model=dict)
+def create_payment_by_weighbill(
+        body: CreatePaymentByWeighbillReq,
+        current_user: dict = Depends(get_current_user)
+):
+    """
+    手动为已上传的磅单创建回款信息
+    （用于自动创建失败时的补救）
+    """
+    check_finance_permission(current_user)
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # 获取磅单信息
+                cur.execute("""
+                    SELECT w.*, d.target_factory_name, d.payee, d.id as delivery_id
+                    FROM pd_weighbills w
+                    JOIN pd_deliveries d ON w.delivery_id = d.id
+                    WHERE w.id = %s
+                """, (body.weighbill_id,))
+                weighbill = cur.fetchone()
+
+                if not weighbill:
+                    raise HTTPException(status_code=404, detail="磅单不存在")
+
+                # 检查是否已存在回款信息
+                cur.execute("""
+                    SELECT id FROM pd_payment_details WHERE weighbill_id = %s
+                """, (body.weighbill_id,))
+                if cur.fetchone():
+                    return {"msg": "该磅单已存在回款信息，无需重复创建"}
+
+                # 创建回款信息
+                from decimal import Decimal
+                from app.services.payment_services import PaymentService, calculate_payment_amount
+
+                unit_price = Decimal(str(weighbill['unit_price'])) if weighbill.get('unit_price') else None
+                net_weight = Decimal(str(weighbill['net_weight'])) if weighbill.get('net_weight') else None
+
+                result = PaymentService.create_or_update_by_weighbill(
+                    weighbill_id=body.weighbill_id,
+                    delivery_id=weighbill['delivery_id'],
+                    contract_no=body.contract_no,
+                    smelter_name=body.smelter_name or weighbill.get('target_factory_name', ''),
+                    material_name=weighbill.get('product_name'),
+                    unit_price=unit_price,
+                    net_weight=net_weight,
+                    total_amount=calculate_payment_amount(unit_price,
+                                                          net_weight) if unit_price and net_weight else None,
+                    created_by=current_user.get("id")
+                )
+
+                return {
+                    "msg": "回款信息创建成功",
+                    "data": result
+                }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("手动创建回款信息异常")
+        raise HTTPException(status_code=500, detail=f"创建失败: {str(e)}")
