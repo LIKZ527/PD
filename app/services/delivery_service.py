@@ -109,10 +109,9 @@ class DeliveryService:
                     customer = cur.fetchone()
                     if not customer:
                         logger.warning(
-                            "合同匹配失败: pd_customers 未找到 smelter_name=%s 的客户记录",
+                            "合同匹配提示: pd_customers 未找到 smelter_name=%s 的客户记录，继续按合同表匹配",
                             factory_name,
                         )
-                        return None, None, None
 
                     cur.execute("""
                         SELECT c.contract_no, p.unit_price
