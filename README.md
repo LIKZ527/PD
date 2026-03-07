@@ -119,17 +119,19 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 磅单管理：
 - POST /api/v1/weighbills/ocr: 上传磅单图片并 OCR 识别。
-- POST /api/v1/weighbills: 新增磅单。
+- POST /api/v1/weighbills/create: 新增磅单（按品种上传）。
 - GET /api/v1/weighbills: 查询磅单列表。
 - GET /api/v1/weighbills/{bill_id}: 查询磅单详情。
 - GET /api/v1/weighbills/{bill_id}/image: 预览磅单图片。
-- PUT /api/v1/weighbills/{bill_id}: 更新磅单。
+- PUT /api/v1/weighbills/modify: 更新磅单（支持修改信息和图片）。
 - DELETE /api/v1/weighbills/{bill_id}: 删除磅单。
 - POST /api/v1/weighbills/{bill_id}/confirm: 磅单确认/锁定。
 - GET /api/v1/weighbills/match/delivery: 匹配磅单与报货订单。
 - GET /api/v1/weighbills/contract/price: 根据合同查询价格信息。
 
 磅单结余/支付回单：
+- 磅单上传/修改成功后会自动生成结余明细。
+- 也可手动触发：POST /api/v1/balances/generate。
 - 结余、支付回单等相关路由已注册到主路由，详见 docs 页面。
 
 ## 安全性说明（当前状态）
