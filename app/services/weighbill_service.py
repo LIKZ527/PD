@@ -561,9 +561,11 @@ class WeighbillService:
                         SELECT w.*, d.report_date, d.warehouse, d.target_factory_name,
                                d.driver_name, d.driver_phone, d.driver_id_card,
                                d.has_delivery_order, d.shipper, d.payee, d.reporter_name,
-                               d.service_fee, d.contract_no as d_contract_no
+                               d.service_fee, d.contract_no as d_contract_no,
+                               pd.collection_status, pd.is_paid_out
                         FROM pd_weighbills w
                         LEFT JOIN pd_deliveries d ON w.delivery_id = d.id
+                        LEFT JOIN pd_payment_details pd ON pd.weighbill_id = w.id
                         WHERE w.id = %s
                     """, (weighbill_id,))
                     row = cur.fetchone()
@@ -587,6 +589,15 @@ class WeighbillService:
                     data["is_manual_corrected_display"] = "是" if data.get("is_manual_corrected") == 1 else "否"
                     data["ocr_status_display"] = data.get("ocr_status", "待上传磅单")
                     data["has_delivery_order_display"] = "是" if data.get("has_delivery_order") == "有" else "否"
+                    if data.get("is_paid_out") is not None:
+                        data["is_paid_out_display"] = "已打款" if data.get("is_paid_out") == 1 else "待打款"
+                    if data.get("collection_status") is not None:
+                        collection_map = {
+                            0: "待回款",
+                            1: "已回首笔待回尾款",
+                            2: "已回款",
+                        }
+                        data["collection_status_display"] = collection_map.get(data.get("collection_status"), "")
 
                     # 操作权限
                     is_uploaded = data.get("upload_status") == "已上传" and data.get("weighbill_image")
@@ -702,10 +713,12 @@ class WeighbillService:
                                d.driver_name, d.driver_phone, d.driver_id_card,
                                d.has_delivery_order, d.shipper, d.payee, d.reporter_name,
                                d.service_fee,
-                               b.schedule_status
+                               b.schedule_status,
+                               pd.collection_status, pd.is_paid_out
                         FROM pd_weighbills w
                         JOIN pd_deliveries d ON w.delivery_id = d.id
                         LEFT JOIN pd_balance_details b ON w.id = b.weighbill_id
+                        LEFT JOIN pd_payment_details pd ON pd.weighbill_id = w.id
                         WHERE {weighbill_sql}
                         ORDER BY w.delivery_id, w.product_name
                     """, tuple(weighbill_params))
@@ -730,6 +743,15 @@ class WeighbillService:
                         wb["is_manual_corrected_display"] = "是" if wb.get("is_manual_corrected") == 1 else "否"
                         wb["ocr_status_display"] = wb.get("ocr_status", "待上传磅单")
                         wb["has_delivery_order_display"] = "是" if wb.get("has_delivery_order") == "有" else "否"
+                        if wb.get("is_paid_out") is not None:
+                            wb["is_paid_out_display"] = "已打款" if wb.get("is_paid_out") == 1 else "待打款"
+                        if wb.get("collection_status") is not None:
+                            collection_map = {
+                                0: "待回款",
+                                1: "已回首笔待回尾款",
+                                2: "已回款",
+                            }
+                            wb["collection_status_display"] = collection_map.get(wb.get("collection_status"), "")
 
                         is_uploaded = wb.get("upload_status") == "已上传" and wb.get("weighbill_image")
                         wb["operations"] = {

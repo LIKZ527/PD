@@ -84,6 +84,10 @@ class WeighbillOut(BaseModel):
     is_manual_corrected_display: str = "否"
     payment_schedule_date: Optional[str] = None
     payment_schedule_status: Optional[str] = None
+    is_paid_out: Optional[int] = None
+    is_paid_out_display: Optional[str] = None
+    collection_status: Optional[int] = None
+    collection_status_display: Optional[str] = None
     uploader_id: Optional[int] = None
     uploader_name: Optional[str] = None
     uploaded_at: Optional[str] = None
