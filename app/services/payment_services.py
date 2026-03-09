@@ -678,8 +678,8 @@ class PaymentService:
         """
         with get_conn() as conn:
             with conn.cursor() as cur:
-                # 构建WHERE条件 - 必须已上传磅单
-                where_clauses = ["wb.id IS NOT NULL"]  # 必须有磅单
+                # 构建WHERE条件
+                where_clauses = ["1=1"]
                 params = []
 
                 if status is not None:
@@ -687,11 +687,11 @@ class PaymentService:
                     params.append(status)
 
                 if smelter_name:
-                    where_clauses.append("pd.smelter_name LIKE %s")
+                    where_clauses.append("COALESCE(pd.smelter_name, d.target_factory_name) LIKE %s")
                     params.append(f"%{smelter_name}%")
 
                 if contract_no:
-                    where_clauses.append("pd.contract_no LIKE %s")
+                    where_clauses.append("COALESCE(pd.contract_no, d.contract_no) LIKE %s")
                     params.append(f"%{contract_no}%")
 
                 if start_date:
@@ -718,9 +718,9 @@ class PaymentService:
                 # 查询总数
                 count_sql = f"""
                     SELECT COUNT(*) as total 
-                    FROM {PaymentService.TABLE_NAME} pd
-                    LEFT JOIN pd_deliveries d ON d.id = COALESCE(pd.delivery_id, pd.sales_order_id)
-                    LEFT JOIN pd_weighbills wb ON wb.delivery_id = d.id OR wb.id = pd.weighbill_id
+                    FROM pd_weighbills wb
+                    LEFT JOIN pd_deliveries d ON d.id = wb.delivery_id
+                    LEFT JOIN {PaymentService.TABLE_NAME} pd ON pd.weighbill_id = wb.id
                     WHERE {where_sql}
                 """
                 cur.execute(count_sql, tuple(params))
@@ -731,7 +731,7 @@ class PaymentService:
                 query_sql = f"""
                     SELECT 
                         -- ========== 第一行：基础信息 ==========
-                        pd.contract_no as 合同编号,
+                        COALESCE(pd.contract_no, d.contract_no) as 合同编号,
                         d.report_date as 报单日期,
                         d.target_factory_name as 报送冶炼厂,
                         d.driver_phone as 司机电话,
@@ -748,7 +748,7 @@ class PaymentService:
                         wb.net_weight as 净重,
                         
                         -- ========== 第三行：回款信息（核心） ==========
-                        pd.unit_price as 销售单价,
+                        COALESCE(pd.unit_price, wb.unit_price) as 销售单价,
                         pd.arrival_payment_amount as 应回款首笔金额,
                         pd.final_payment_amount as 应回款尾款金额,
                         pd.arrival_paid_amount as 已回款首笔金额,
@@ -761,6 +761,7 @@ class PaymentService:
                             WHEN pd.collection_status = 0 THEN '待回款'
                             WHEN pd.collection_status = 1 THEN '已回首笔待回尾款'
                             WHEN pd.collection_status = 2 THEN '已回尾款'
+                            WHEN pd.collection_status IS NULL THEN '未生成回款'
                             ELSE '未知'
                         END as 回款状态显示,
                         
@@ -774,11 +775,11 @@ class PaymentService:
                         pd.created_at,
                         pd.updated_at
                         
-                    FROM {PaymentService.TABLE_NAME} pd
-                    LEFT JOIN pd_deliveries d ON d.id = COALESCE(pd.delivery_id, pd.sales_order_id)
-                    LEFT JOIN pd_weighbills wb ON wb.delivery_id = d.id OR wb.id = pd.weighbill_id
+                    FROM pd_weighbills wb
+                    LEFT JOIN pd_deliveries d ON d.id = wb.delivery_id
+                    LEFT JOIN {PaymentService.TABLE_NAME} pd ON pd.weighbill_id = wb.id
                     WHERE {where_sql}
-                    ORDER BY pd.created_at DESC
+                    ORDER BY wb.created_at DESC
                     LIMIT %s OFFSET %s
                 """
 
@@ -814,6 +815,7 @@ class PaymentService:
                         "待回款笔数": sum(1 for i in items if i.get('回款状态') == 0),
                         "已回首笔待回尾款笔数": sum(1 for i in items if i.get('回款状态') == 1),
                         "已回尾款笔数": sum(1 for i in items if i.get('回款状态') == 2),
+                        "未生成回款笔数": sum(1 for i in items if i.get('回款状态') is None),
                     }
                 }
             
