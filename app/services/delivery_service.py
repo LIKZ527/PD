@@ -8,12 +8,12 @@ import re
 from decimal import Decimal, ROUND_FLOOR
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-
-from app.services.contract_service import get_conn
+from app.core.paths import UPLOADS_DIR
+from core.database import get_conn
 
 logger = logging.getLogger(__name__)
 
-from app.core.paths import UPLOADS_DIR
+
 
 # 使用绝对路径，避免工作目录变化导致的问题
 UPLOAD_DIR = UPLOADS_DIR / "delivery_orders"
@@ -153,8 +153,9 @@ class DeliveryService:
                     skipped_contracts = []  # 记录车数不足被跳过的合同
 
                     for idx, contract in enumerate(matching_contracts):
-                        contract_no, unit_price, total_qty, contract_trucks = contract
-                        contract_trucks = int(contract_trucks)
+                        contract_no = contract.get("contract_no")
+                        unit_price = contract.get("unit_price")
+                        contract_trucks = int(contract.get("contract_trucks") or 0)
 
                         # 统计该合同已匹配的报单车数总和
                         cur.execute("""
