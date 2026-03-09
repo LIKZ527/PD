@@ -2,12 +2,8 @@
 客户服务 - 冶炼厂客户档案管理
 """
 import logging
-from typing import List, Dict, Optional, Any
-from contextlib import contextmanager
-
-import pymysql
-
-from app.services.contract_service import get_db_config, get_conn
+from typing import Dict, Optional, Any
+from app.services.contract_service import get_conn
 
 logger = logging.getLogger(__name__)
 

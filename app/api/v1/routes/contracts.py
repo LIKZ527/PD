@@ -9,12 +9,11 @@ import shutil
 import json
 from io import StringIO
 from decimal import Decimal
-from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Body, Form
 from fastapi.responses import StreamingResponse, FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from datetime import date
 
 from app.core.paths import UPLOADS_DIR

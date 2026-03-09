@@ -10,7 +10,6 @@ from core.logging import get_logger
 from core.auth import get_current_user
 from app.services.payment_services import (
     PaymentService,
-    PaymentStatus,
     PaymentStage,
     calculate_payment_amount
 )
@@ -373,7 +372,7 @@ def create_payment_detail(
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("创建收款明细异常")
         raise HTTPException(status_code=500, detail="创建收款明细失败")
 
@@ -422,7 +421,7 @@ def list_payment_details(
         )
         return result
 
-    except Exception as e:
+    except Exception:
         logger.exception("查询回款信息列表异常")
         raise HTTPException(status_code=500, detail="查询失败")
     
@@ -479,7 +478,7 @@ def list_payment_out_details(
         )
         return result
 
-    except Exception as e:
+    except Exception:
         logger.exception("查询打款信息列表异常")
         raise HTTPException(status_code=500, detail="查询失败")
 
@@ -522,7 +521,7 @@ def update_collection_payment(
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("编辑回款异常")
         raise HTTPException(status_code=500, detail="更新失败")
 
@@ -571,7 +570,7 @@ def update_payment_detail(
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("更新收款明细异常")
         raise HTTPException(status_code=500, detail="更新失败")
 
@@ -603,7 +602,7 @@ def update_payment_status(
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("更新付款状态异常")
         raise HTTPException(status_code=500, detail="更新失败")
 
@@ -626,7 +625,7 @@ def delete_payment_detail(
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("删除收款明细异常")
         raise HTTPException(status_code=500, detail="删除失败")
 
@@ -665,7 +664,7 @@ def list_contract_shipping_progress(
             "msg": "查询成功",
             "data": result
         }
-    except Exception as e:
+    except Exception:
         logger.exception("查询合同发运进度异常")
         raise HTTPException(status_code=500, detail="查询失败")
 
@@ -707,7 +706,7 @@ def list_contract_payment_summary(
             "msg": "查询成功",
             "data": result
         }
-    except Exception as e:
+    except Exception:
         logger.exception("查询合同回款汇总异常")
         raise HTTPException(status_code=500, detail="查询失败")
 
@@ -745,7 +744,7 @@ def get_contract_payment_details(
         }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("查询合同回款明细异常")
         raise HTTPException(status_code=500, detail="查询失败")
 
@@ -799,7 +798,7 @@ def record_payment(
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("录入回款记录异常")
         raise HTTPException(status_code=500, detail="录入失败")
 

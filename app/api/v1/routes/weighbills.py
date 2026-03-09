@@ -2,21 +2,17 @@
 磅单管理路由 - 支持一报单多品种（最多4个）
 """
 import logging
-import json
 import os
-import re
 import shutil
-from pathlib import Path
 from typing import Optional, List
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Body, Form
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Form
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
-from app.core.paths import TEMP_UPLOADS_DIR, UPLOADS_DIR
+from app.core.paths import TEMP_UPLOADS_DIR
 from app.services.weighbill_service import WeighbillService, get_weighbill_service
 from app.services.contract_service import get_conn
-from app.services.payment_services import PaymentService
 from core.auth import get_current_user
 
 router = APIRouter(prefix="/weighbills", tags=["磅单管理"])

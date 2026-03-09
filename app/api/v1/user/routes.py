@@ -2,18 +2,14 @@ from fastapi import HTTPException, APIRouter, Depends
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
-from enum import IntEnum
-
 from core.database import get_conn
 from core.logging import get_logger
-from core.table_access import build_dynamic_select, _quote_identifier
+from core.table_access import build_dynamic_select
 from core.auth import create_access_token, get_current_user
 from services.pd_auth_service import (
     AuthService, 
     UserStatus, 
     UserRole,
-    verify_pwd,
-    hash_pwd
 )
 
 logger = get_logger(__name__)

@@ -2,7 +2,7 @@
 客户管理路由 - 冶炼厂客户档案
 支持手动录入、编辑、查询
 """
-from typing import Optional, List
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
