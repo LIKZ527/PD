@@ -1,5 +1,6 @@
 """
-销售台账/报货订单服务
+销售台账/报货订单服务 - 完整版
+支持合同品种匹配 + 车数校验（向后匹配）
 """
 import logging
 import os
@@ -17,6 +18,9 @@ from app.core.paths import UPLOADS_DIR
 # 使用绝对路径，避免工作目录变化导致的问题
 UPLOAD_DIR = UPLOADS_DIR / "delivery_orders"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# 标准车容量（吨）
+STANDARD_TRUCK_CAPACITY = Decimal('35')
 
 
 class DeliveryService:
@@ -78,146 +82,153 @@ class DeliveryService:
             return Decimal('150')
         return Decimal('0')
 
-    def _calculate_price(self, factory_name: str, product_name: str, quantity: Decimal,
-                         report_date: Optional[str] = None) -> tuple:
+    def _calculate_trucks(self, quantity: Decimal) -> int:
         """
-        关联合同计算价格
-        返回: (contract_no, unit_price, total_amount)
+        计算车数（向上取整）
+        车数 = ceil(quantity / 35)
+        """
+        if quantity <= 0:
+            return 1
+        return int((quantity / STANDARD_TRUCK_CAPACITY).to_integral_value(rounding=ROUND_CEILING))
+
+    def _match_contract_with_truck_check(self, factory_name: str,
+                                          product_name: str,
+                                          planned_trucks: int,
+                                          report_date: str) -> Dict:
+        """
+        匹配合同（向后匹配策略）：
+        1. 先按品种匹配（只匹配unit_price>0的有效品种）
+        2. 按时间倒序排列（最新的优先）
+        3. 依次检查每个合同的车数：
+           - 如果够，匹配成功
+           - 如果不够，记录并继续下一个
+        4. 如果所有合同车数都不够，返回详细错误
+
+        返回: {
+            'matched': bool,
+            'contract_no': str or None,
+            'unit_price': float or None,
+            'total_amount': float or None,
+            'is_last_delivery': bool,
+            'contract_total_trucks': int,
+            'contract_used_trucks': int,
+            'contract_remaining_trucks': int,
+            'this_delivery_trucks': int,
+            'skipped_contracts': list,  # 跳过的合同列表
+            'reason': str or None
+        }
         """
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    factory_name = (factory_name or "").strip()
-                    product_name = (product_name or "").strip()
                     effective_date = report_date or datetime.today().date().isoformat()
 
-                    logger.info(
-                        "合同匹配开始: factory=%s, product=%s, report_date=%s, effective_date=%s",
-                        factory_name,
-                        product_name,
-                        report_date,
-                        effective_date,
-                    )
-
-                    cur.execute(
-                        "SELECT id FROM pd_customers WHERE smelter_name = %s",
-                        (factory_name,)
-                    )
-                    customer = cur.fetchone()
-                    if not customer:
-                        logger.warning(
-                            "合同匹配提示: pd_customers 未找到 smelter_name=%s 的客户记录，继续按合同表匹配",
-                            factory_name,
-                        )
-
+                    # Step 1: 品种匹配（只匹配unit_price>0的有效品种）
                     cur.execute("""
-                        SELECT c.contract_no, p.unit_price
+                        SELECT c.contract_no, p.unit_price, c.total_quantity,
+                               CEIL(c.total_quantity / 35) as contract_trucks
                         FROM pd_contracts c
                         JOIN pd_contract_products p ON p.contract_id = c.id
                         WHERE c.smelter_company = %s
                         AND p.product_name = %s
+                        AND p.unit_price > 0              -- 只匹配有效价格（价格>0）
                         AND c.status = '生效中'
                         AND c.contract_date <= %s
                         AND (c.end_date IS NULL OR c.end_date >= %s)
                         ORDER BY c.created_at DESC, p.sort_order ASC
-                        LIMIT 1
                     """, (factory_name, product_name, effective_date, effective_date))
 
-                    contract = cur.fetchone()
-                    if not contract:
-                        # 仅在未匹配到时输出诊断信息，帮助定位具体失败条件
-                        cur.execute(
-                            "SELECT COUNT(*) FROM pd_contracts WHERE smelter_company = %s",
-                            (factory_name,),
+                    matching_contracts = cur.fetchall()
+
+                    if not matching_contracts:
+                        return {
+                            'matched': False,
+                            'reason': f'未找到匹配品种[{product_name}]的有效合同（价格必须>0）',
+                            'contract_no': None,
+                            'unit_price': None,
+                            'skipped_contracts': []
+                        }
+
+                    # Step 2: 遍历所有匹配的合同，找车数足够的
+                    skipped_contracts = []  # 记录车数不足被跳过的合同
+
+                    for idx, contract in enumerate(matching_contracts):
+                        contract_no, unit_price, total_qty, contract_trucks = contract
+                        contract_trucks = int(contract_trucks)
+
+                        # 统计该合同已匹配的报单车数总和
+                        cur.execute("""
+                            SELECT COALESCE(SUM(planned_trucks), 0) as used_trucks
+                            FROM pd_deliveries
+                            WHERE contract_no = %s
+                            AND status IN ('待确认', '已确认', '已完成')
+                        """, (contract_no,))
+
+                        used_trucks = int(cur.fetchone()['used_trucks'] or 0)
+                        remaining = contract_trucks - used_trucks
+
+                        # 检查车数是否足够
+                        if planned_trucks <= remaining:
+                            # 找到够车数的合同！判断是否最后一单
+                            is_last = (used_trucks + planned_trucks) >= contract_trucks
+
+                            return {
+                                'matched': True,
+                                'contract_no': contract_no,
+                                'unit_price': float(unit_price) if unit_price else None,
+                                'is_last_delivery': is_last,
+                                'contract_total_trucks': contract_trucks,
+                                'contract_used_trucks': used_trucks,
+                                'contract_remaining_trucks': remaining - planned_trucks,
+                                'this_delivery_trucks': planned_trucks,
+                                'matched_index': idx + 1,  # 第几个匹配的合同
+                                'total_matched': len(matching_contracts),
+                                'skipped_contracts': skipped_contracts,
+                                'reason': None
+                            }
+                        else:
+                            # 车数不够，记录并继续下一个
+                            skipped_contracts.append({
+                                'index': idx + 1,
+                                'contract_no': contract_no,
+                                'unit_price': float(unit_price) if unit_price else None,
+                                'total_trucks': contract_trucks,
+                                'used_trucks': used_trucks,
+                                'remaining_trucks': remaining,
+                                'need_trucks': planned_trucks,
+                                'skip_reason': f'车数不足（需{planned_trucks}车，仅余{remaining}车）'
+                            })
+
+                    # Step 3: 所有匹配的合同车数都不够
+                    # 构建详细的错误信息
+                    error_details = []
+                    for info in skipped_contracts:
+                        error_details.append(
+                            f"[{info['contract_no']}]总{info['total_trucks']}车/"
+                            f"已用{info['used_trucks']}车/"
+                            f"剩{info['remaining_trucks']}车"
                         )
-                        factory_contract_count = cur.fetchone()[0]
 
-                        cur.execute(
-                            """
-                            SELECT COUNT(*)
-                            FROM pd_contracts c
-                            JOIN pd_contract_products p ON p.contract_id = c.id
-                            WHERE c.smelter_company = %s
-                              AND p.product_name = %s
-                            """,
-                            (factory_name, product_name),
-                        )
-                        product_match_count = cur.fetchone()[0]
-
-                        cur.execute(
-                            """
-                            SELECT COUNT(*)
-                            FROM pd_contracts c
-                            JOIN pd_contract_products p ON p.contract_id = c.id
-                            WHERE c.smelter_company = %s
-                              AND p.product_name = %s
-                              AND c.status = '生效中'
-                            """,
-                            (factory_name, product_name),
-                        )
-                        status_match_count = cur.fetchone()[0]
-
-                        cur.execute(
-                            """
-                            SELECT COUNT(*)
-                            FROM pd_contracts c
-                            JOIN pd_contract_products p ON p.contract_id = c.id
-                            WHERE c.smelter_company = %s
-                              AND p.product_name = %s
-                              AND c.status = '生效中'
-                              AND c.contract_date <= %s
-                              AND (c.end_date IS NULL OR c.end_date >= %s)
-                            """,
-                            (factory_name, product_name, effective_date, effective_date),
-                        )
-                        date_match_count = cur.fetchone()[0]
-
-                        cur.execute(
-                            """
-                            SELECT c.contract_no, c.status, c.contract_date, c.end_date, p.product_name, p.unit_price
-                            FROM pd_contracts c
-                            JOIN pd_contract_products p ON p.contract_id = c.id
-                            WHERE c.smelter_company = %s
-                            ORDER BY c.created_at DESC, p.sort_order ASC
-                            LIMIT 5
-                            """,
-                            (factory_name,),
-                        )
-                        candidates = cur.fetchall()
-
-                        logger.warning(
-                            "合同匹配失败: factory=%s, product=%s, effective_date=%s, "
-                            "factory_contract_count=%s, product_match_count=%s, status_match_count=%s, date_match_count=%s, "
-                            "candidate_top5=%s",
-                            factory_name,
-                            product_name,
-                            effective_date,
-                            factory_contract_count,
-                            product_match_count,
-                            status_match_count,
-                            date_match_count,
-                            candidates,
-                        )
-                        return None, None, None
-
-                    contract_no, unit_price = contract
-                    if unit_price and quantity:
-                        total = Decimal(str(unit_price)) * Decimal(str(quantity))
-                    else:
-                        total = None
-
-                    logger.info(
-                        "合同匹配成功: contract_no=%s, unit_price=%s, total_amount=%s",
-                        contract_no,
-                        unit_price,
-                        total,
-                    )
-
-                    return contract_no, float(unit_price) if unit_price else None, float(total) if total else None
+                    return {
+                        'matched': False,
+                        'reason': f'找到{len(matching_contracts)}个匹配品种[{product_name}]的合同，'
+                                  f'但车数均不足本单需要{planned_trucks}车：'
+                                  f'{"; ".join(error_details)}',
+                        'contract_no': None,
+                        'unit_price': None,
+                        'skipped_contracts': skipped_contracts,
+                        'suggest': '请拆分报单数量，或创建新车数充足的新合同'
+                    }
 
         except Exception as e:
-            logger.error(f"计算价格失败: {e}")
-            return None, None, None
+            logger.error(f"合同匹配失败: {e}")
+            return {
+                'matched': False,
+                'reason': f'匹配异常: {str(e)}',
+                'contract_no': None,
+                'unit_price': None,
+                'skipped_contracts': []
+            }
 
     def _get_contract_price_by_product(self, contract_no: str, product_name: str) -> Optional[float]:
         """
@@ -244,19 +255,20 @@ class DeliveryService:
             logger.error(f"获取品种单价失败: {e}")
             return None
 
-    def _create_pending_weighbills(self, delivery_id: int, contract_no: str,
-                                   products: List[str], vehicle_no: str,
-                                   uploader_id: int, uploader_name: str) -> bool:
+    def _create_weighbills(self, delivery_id: int, contract_no: str,
+                           vehicle_no: str, products: List[str],
+                           is_last_for_contract: bool,
+                           unit_price: float,
+                           uploader_id: int,
+                           uploader_name: str) -> bool:
         """
-        为每个品种创建待上传磅单记录
-        一个品种一条记录，状态为"待上传磅单"
+        为每个品种创建磅单占位记录
         """
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    created_count = 0
                     for product_name in products:
-                        # 检查是否已存在（防重复）
+                        # 检查是否已存在
                         cur.execute("""
                             SELECT id FROM pd_weighbills 
                             WHERE delivery_id = %s AND product_name = %s
@@ -266,33 +278,29 @@ class DeliveryService:
                             logger.warning(f"品种 {product_name} 的磅单已存在，跳过")
                             continue
 
-                        # 获取该品种的合同单价
-                        unit_price = self._get_contract_price_by_product(contract_no, product_name)
+                        # 创建磅单，标记最后一车
+                        is_last_mark = 1 if is_last_for_contract else 0
 
                         cur.execute("""
                             INSERT INTO pd_weighbills 
-                            (delivery_id, contract_no, vehicle_no, product_name, 
-                             unit_price, upload_status, ocr_status, 
+                            (delivery_id, contract_no, vehicle_no, product_name,
+                             is_last_truck_for_contract,
+                             unit_price, upload_status, ocr_status,
                              uploader_id, uploader_name, uploaded_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                         """, (
-                            delivery_id,
-                            contract_no,
-                            vehicle_no,
-                            product_name,
-                            unit_price,
-                            '待上传',
-                            '待上传磅单',
-                            uploader_id,
-                            uploader_name
+                            delivery_id, contract_no, vehicle_no, product_name,
+                            is_last_mark,
+                            unit_price, '待上传', '待上传磅单',
+                            uploader_id, uploader_name
                         ))
-                        created_count += 1
 
-                    logger.info(f"为报单 {delivery_id} 创建了 {created_count} 条待上传磅单记录")
+                    logger.info(f"报单{delivery_id}:创建{len(products)}个品种磅单,"
+                               f"合同最后一单={is_last_for_contract}")
                     return True
 
         except Exception as e:
-            logger.error(f"创建待上传磅单记录失败: {e}")
+            logger.error(f"创建磅单记录失败: {e}")
             return False
 
     def check_duplicate_in_24h(self, driver_phone: str, driver_id_card: str, exclude_id: int = None) -> Dict[str, Any]:
@@ -361,15 +369,38 @@ class DeliveryService:
             "can_view": is_uploaded
         }
 
+    def _parse_products(self, products_raw: Any, product_name: str = None) -> List[str]:
+        """
+        解析品种列表
+        """
+        products = []
+
+        if products_raw is None:
+            products = []
+        elif isinstance(products_raw, str):
+            products = [p.strip() for p in products_raw.split(',') if p.strip()]
+        elif isinstance(products_raw, (list, tuple)):
+            products = list(products_raw)
+
+        # 去重，最多4个
+        products = list(dict.fromkeys(products))[:4]
+
+        # 如果没有，使用主品种
+        if not products and product_name:
+            products = [product_name]
+
+        return products
+
     def create_delivery(self, data: Dict, image_file: bytes = None,
                         current_user: dict = None, confirm_flag: bool = False) -> Dict[str, Any]:
-        """创建报货订单"""
+        """创建报货订单（支持合同品种匹配+车数校验+向后匹配）"""
         image_path = None
         temp_file_path = None
 
         try:
             driver_phone = data.get('driver_phone') if data else None
             driver_id_card = data.get('driver_id_card') if data else None
+
             # 参数防御性检查
             if data is None:
                 return {"success": False, "error": "请求数据不能为空"}
@@ -402,18 +433,16 @@ class DeliveryService:
             service_fee = self._calculate_service_fee(has_order)
             logger.info(f"【DEBUG】service_fee={service_fee}")
 
-            # 24小时重复校验 - 关键修复点
+            # 24小时重复校验
             if not confirm_flag:
                 driver_phone = data.get('driver_phone')
                 driver_id_card = data.get('driver_id_card')
 
                 logger.info(f"【DEBUG】检查重复，driver_phone={driver_phone}, driver_id_card={driver_id_card}")
 
-                # 防御：确保有值才检查
                 if driver_phone or driver_id_card:
                     duplicate_check = self.check_duplicate_in_24h(driver_phone, driver_id_card)
 
-                    # 防御：确保返回字典
                     if duplicate_check is None:
                         duplicate_check = {"is_duplicate": False, "existing_orders": [], "duplicate_count": 0}
 
@@ -427,54 +456,47 @@ class DeliveryService:
                             "existing_orders": duplicate_check.get("existing_orders", [])
                         }
 
-            # 处理品种列表 - 关键修复点
-            products = data.get('products', [])
-            logger.info(f"【DEBUG】原始 products={products}, type={type(products)}")
-
-            # 防御：确保是列表
-            if products is None:
-                products = []
-            elif isinstance(products, str):
-                products = [p.strip() for p in products.split(',') if p.strip()]
-            elif not isinstance(products, (list, tuple)):
-                products = []
-
-            # 去重，最多4个
-            products = list(dict.fromkeys(products))[:4]
+            # 处理品种列表
+            products = self._parse_products(data.get('products'), data.get('product_name'))
             logger.info(f"【DEBUG】处理后 products={products}")
 
             if not products:
-                main_product = data.get('product_name')
-                if main_product:
-                    products = [main_product]
-                    logger.info(f"【DEBUG】使用主品种={main_product}")
-
-            # 确保有品种
-            if not products:
                 return {"success": False, "error": "货物品种不能为空"}
 
-            # 计算价格
-            contract_no = None
-            unit_price = None
-            total_amount = None
-
+            # 获取关键参数
             target_factory = data.get('target_factory_name')
-            quantity = data.get('quantity')
+            quantity = Decimal(str(data.get('quantity', 0)))
 
-            if target_factory and products and quantity:
-                logger.info(f"【DEBUG】计算价格: factory={target_factory}, product={products[0]}, quantity={quantity}")
-                try:
-                    contract_no, unit_price, total_amount = self._calculate_price(
-                        target_factory,
-                        products[0],
-                        Decimal(str(quantity)),
-                        data.get('report_date')
-                    )
-                    logger.info(
-                        f"【DEBUG】价格结果: contract_no={contract_no}, unit_price={unit_price}, total_amount={total_amount}")
-                except Exception as price_err:
-                    logger.error(f"【DEBUG】计算价格失败: {price_err}")
-                    # 价格计算失败不阻断流程
+            # 计算本单总车数
+            planned_trucks = self._calculate_trucks(quantity)
+            logger.info(f"【DEBUG】quantity={quantity}, planned_trucks={planned_trucks}")
+
+            # 核心：品种匹配 + 车数校验（向后匹配）
+            match_result = self._match_contract_with_truck_check(
+                factory_name=target_factory,
+                product_name=products[0],
+                planned_trucks=planned_trucks,
+                report_date=data.get('report_date')
+            )
+
+            if not match_result['matched']:
+                return {
+                    "success": False,
+                    "error": match_result['reason'],
+                    "suggest": match_result.get('suggest', '请拆分报单数量，或创建新车数充足的新合同')
+                }
+
+            # 提取匹配结果
+            contract_no = match_result['contract_no']
+            unit_price = match_result['unit_price']
+            is_last_delivery = match_result['is_last_delivery']
+
+            # 计算总价
+            total_amount = float(unit_price * quantity) if (unit_price and quantity) else None
+
+            logger.info(f"【DEBUG】匹配成功: contract_no={contract_no}, "
+                       f"unit_price={unit_price}, is_last_delivery={is_last_delivery}, "
+                       f"skipped={len(match_result.get('skipped_contracts', []))}")
 
             # 处理联单图片
             upload_status = '待上传'
@@ -505,11 +527,12 @@ class DeliveryService:
                     # 构建插入字段
                     insert_fields = [
                         'report_date', 'warehouse', 'target_factory_id', 'target_factory_name',
-                        'product_name', 'quantity', 'vehicle_no', 'driver_name',
-                        'driver_phone', 'driver_id_card', 'has_delivery_order', 'delivery_order_image',
-                        'upload_status', 'source_type', 'shipper', 'payee', 'service_fee',
-                        'contract_no', 'contract_unit_price', 'total_amount', 'status',
-                        'uploader_id', 'uploader_name', 'reporter_id', 'reporter_name'
+                        'product_name', 'quantity', 'planned_trucks', 'vehicle_no',
+                        'driver_name', 'driver_phone', 'driver_id_card', 'has_delivery_order',
+                        'delivery_order_image', 'upload_status', 'source_type', 'shipper',
+                        'payee', 'service_fee', 'contract_no', 'contract_unit_price',
+                        'total_amount', 'status', 'uploader_id', 'uploader_name',
+                        'reporter_id', 'reporter_name'
                     ]
 
                     # 准备值列表
@@ -517,9 +540,10 @@ class DeliveryService:
                         data.get('report_date'),
                         data.get('warehouse'),
                         data.get('target_factory_id'),
-                        data.get('target_factory_name'),
-                        products[0] if products else data.get('product_name'),  # 主品种
+                        target_factory,
+                        products[0] if products else data.get('product_name'),
                         quantity,
+                        planned_trucks,
                         data.get('vehicle_no'),
                         data.get('driver_name'),
                         driver_phone,
@@ -556,31 +580,38 @@ class DeliveryService:
                     """
 
                     logger.info(f"【DEBUG】SQL: {sql[:100]}...")
-                    logger.info(f"【DEBUG】Values: {values[:5]}...")
-
                     cur.execute(sql, tuple(values))
                     delivery_id = cur.lastrowid
                     logger.info(f"【DEBUG】插入成功, delivery_id={delivery_id}")
 
-                    # 创建待上传磅单记录
+                    # 创建磅单记录
                     if products and contract_no:
                         logger.info(f"【DEBUG】创建磅单记录...")
-                        self._create_pending_weighbills(
-                            delivery_id, contract_no, products,
-                            data.get('vehicle_no'), uploader_id, uploader_name
+                        self._create_weighbills(
+                            delivery_id=delivery_id,
+                            contract_no=contract_no,
+                            vehicle_no=data.get('vehicle_no'),
+                            products=products,
+                            is_last_for_contract=is_last_delivery,
+                            unit_price=unit_price,
+                            uploader_id=uploader_id,
+                            uploader_name=uploader_name
                         )
 
                     temp_file_path = None
 
                     operations = self._build_operations(has_order, upload_status, image_path)
 
-                    return {
+                    # 构建返回数据
+                    response_data = {
                         "success": True,
-                        "message": "报货订单创建成功",
+                        "message": "报货订单创建成功" + ("（合同最后一单）" if is_last_delivery else ""),
                         "data": {
                             "id": delivery_id,
                             "contract_no": contract_no,
                             "products": products,
+                            "quantity": float(quantity),
+                            "planned_trucks": planned_trucks,
                             "contract_unit_price": unit_price,
                             "total_amount": total_amount,
                             "source_type": source_type,
@@ -590,9 +621,28 @@ class DeliveryService:
                             "uploader_name": uploader_name,
                             "reporter_id": reporter_id,
                             "reporter_name": reporter_name,
+                            "is_last_delivery": is_last_delivery,
+                            "contract_truck_info": {
+                                "contract_total_trucks": match_result['contract_total_trucks'],
+                                "contract_used_trucks": match_result['contract_used_trucks'],
+                                "contract_remaining_trucks": match_result['contract_remaining_trucks'],
+                                "this_delivery_trucks": match_result['this_delivery_trucks']
+                            },
                             "operations": operations
                         }
                     }
+
+                    # 如果有跳过的合同，添加匹配过程信息
+                    if match_result.get('skipped_contracts'):
+                        response_data["data"]["match_process"] = {
+                            "total_matched_contracts": match_result.get('total_matched', 0),
+                            "matched_index": match_result.get('matched_index', 1),
+                            "skipped_count": len(match_result['skipped_contracts']),
+                            "skipped_contracts": match_result['skipped_contracts']
+                        }
+                        response_data["message"] += f"（已跳过{len(match_result['skipped_contracts'])}个车数不足的合同）"
+
+                    return response_data
 
         except Exception as e:
             # 清理临时文件
@@ -603,6 +653,7 @@ class DeliveryService:
                     pass
             logger.exception(f"【DEBUG】创建报货订单异常: {e}")
             return {"success": False, "error": str(e)}
+
     def update_delivery(self, delivery_id: int, data: Dict,
                         image_file: bytes = None, delete_image: bool = False,
                         uploaded_by: str = None) -> Dict[str, Any]:
@@ -614,14 +665,14 @@ class DeliveryService:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT has_delivery_order, delivery_order_image, upload_status, driver_phone, driver_id_card FROM pd_deliveries WHERE id = %s",
+                        "SELECT has_delivery_order, delivery_order_image, upload_status, driver_phone, driver_id_card, planned_trucks, contract_no FROM pd_deliveries WHERE id = %s",
                         (delivery_id,)
                     )
                     old = cur.fetchone()
                     if not old:
                         return {"success": False, "error": f"订单ID {delivery_id} 不存在"}
 
-                    old_has_order, old_image_path, old_upload_status, old_driver_phone, old_driver_id_card = old
+                    old_has_order, old_image_path, old_upload_status, old_driver_phone, old_driver_id_card, old_planned_trucks, old_contract_no = old
 
                     has_order = data.get('has_delivery_order', old_has_order)
                     if 'has_delivery_order' in data or uploaded_by:
@@ -634,6 +685,12 @@ class DeliveryService:
                     if 'reporter_id' in data or 'reporter_name' in data:
                         if data.get('reporter_name'):
                             data['shipper'] = data['reporter_name']
+
+                    # 如果修改了数量，重新计算车数（但不重新匹配合同）
+                    if 'quantity' in data and data['quantity']:
+                        new_quantity = Decimal(str(data['quantity']))
+                        new_planned_trucks = self._calculate_trucks(new_quantity)
+                        data['planned_trucks'] = new_planned_trucks
 
                     new_image_path = old_image_path
                     upload_status = old_upload_status
@@ -665,7 +722,8 @@ class DeliveryService:
 
                     fields = [
                         'report_date', 'warehouse', 'target_factory_id', 'target_factory_name',
-                        'product_name', 'quantity', 'vehicle_no', 'driver_name', 'driver_phone', 'driver_id_card',
+                        'product_name', 'quantity', 'planned_trucks', 'vehicle_no',
+                        'driver_name', 'driver_phone', 'driver_id_card',
                         'has_delivery_order', 'delivery_order_image', 'upload_status', 'source_type',
                         'shipper', 'payee', 'service_fee', 'contract_no', 'contract_unit_price', 'total_amount',
                         'status', 'reporter_id', 'reporter_name'
@@ -723,7 +781,7 @@ class DeliveryService:
             return {"success": False, "error": str(e)}
 
     def get_delivery(self, delivery_id: int) -> Optional[Dict]:
-        """获取订单详情"""
+        """获取订单详情（包含多车信息）"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -750,6 +808,29 @@ class DeliveryService:
 
                     if data.get('service_fee'):
                         data['service_fee'] = float(data['service_fee'])
+
+                    # 查询关联的磅单
+                    cur.execute("""
+                        SELECT id, product_name, is_last_truck_for_contract,
+                               net_weight, upload_status, ocr_status, weigh_date
+                        FROM pd_weighbills
+                        WHERE delivery_id = %s
+                        ORDER BY product_name
+                    """, (delivery_id,))
+
+                    weighbills = []
+                    for w_row in cur.fetchall():
+                        weighbill = {
+                            'id': w_row[0],
+                            'product_name': w_row[1],
+                            'is_last_for_contract': bool(w_row[2]),
+                            'net_weight': float(w_row[3]) if w_row[3] else None,
+                            'status': w_row[5] or w_row[4]
+                        }
+                        weighbills.append(weighbill)
+
+                    data['weighbills'] = weighbills
+                    data['is_last_for_contract'] = any(w['is_last_for_contract'] for w in weighbills)
 
                     data['operations'] = self._build_operations(
                         data.get('has_delivery_order'),
@@ -882,10 +963,9 @@ class DeliveryService:
                                 item[key] = str(item[key])
 
                         # 解析品种列表
-                        # 在 list_deliveries 方法中，返回前解析
                         if item.get('products'):
                             item['products'] = [p.strip() for p in item['products'].split(',') if p.strip()]
-                            item['product_count'] = len(item['products'])  # ← 品种数量
+                            item['product_count'] = len(item['products'])
                         else:
                             item['products'] = [item.get('product_name')] if item.get('product_name') else []
                             item['product_count'] = 1
@@ -902,8 +982,8 @@ class DeliveryService:
                             item.get('delivery_order_image')
                         )
 
-                        # 确保返回数据中包含 contract_no 字段（可能为 None）
                         item['contract_no'] = item.get('contract_no')
+                        item['planned_trucks'] = item.get('planned_trucks', 1)
 
                         data.append(item)
 
@@ -940,7 +1020,6 @@ class DeliveryService:
 
                     if row and row[0]:
                         image_path = row[0]
-                        # 级联删除由外键约束处理
                         cur.execute("DELETE FROM pd_deliveries WHERE id = %s", (delivery_id,))
 
                         if os.path.exists(image_path):

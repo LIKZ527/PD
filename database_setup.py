@@ -158,6 +158,7 @@ TABLE_STATEMENTS = [
 		status VARCHAR(32) DEFAULT '待确认' COMMENT '状态：待确认/已确认/已完成/已取消',
 		uploader_id BIGINT COMMENT '上传人ID（关联pd_users.id）',
 		uploader_name VARCHAR(64) COMMENT '上传人姓名（冗余存储）',
+		planned_trucks INT DEFAULT 1 COMMENT '预计车数（quantity/35向上取整）',
 		uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '上传时间',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -195,6 +196,7 @@ TABLE_STATEMENTS = [
 		payment_schedule_date DATE COMMENT '排款日期',
 		uploader_id BIGINT COMMENT '上传人ID（关联pd_users.id）',
 		uploader_name VARCHAR(64) COMMENT '上传人姓名（冗余存储）',
+		is_last_truck_for_contract TINYINT DEFAULT 0 COMMENT '是否为合同最后一车',
 		uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '上传时间',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -236,21 +238,21 @@ TABLE_STATEMENTS = [
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='打款明细表';
 	""",
-	    """
-    CREATE TABLE IF NOT EXISTS pd_warehouse_payees (
+	"""
+	CREATE TABLE IF NOT EXISTS pd_warehouse_payees (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
-        warehouse_name VARCHAR(64) NOT NULL COMMENT '库房名称',
-        payee_name VARCHAR(64) NOT NULL COMMENT '收款人姓名',
-        payee_account VARCHAR(32) NOT NULL COMMENT '收款账号',
-        payee_bank_name VARCHAR(64) COMMENT '收款银行名称',
-        is_active TINYINT DEFAULT 1 COMMENT '是否启用：1=启用，0=停用',
+		warehouse_name VARCHAR(64) NOT NULL COMMENT '库房名称',
+		payee_name VARCHAR(64) NOT NULL COMMENT '收款人姓名',
+		payee_account VARCHAR(32) NOT NULL COMMENT '收款账号',
+		payee_bank_name VARCHAR(64) COMMENT '收款银行名称',
+		is_active TINYINT DEFAULT 1 COMMENT '是否启用：1=启用，0=停用',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-        INDEX idx_warehouse_name (warehouse_name),
-        INDEX idx_payee_name (payee_name),
-        INDEX idx_is_active (is_active)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='库房与收款人配置表';
-    """,
+		INDEX idx_warehouse_name (warehouse_name),
+		INDEX idx_payee_name (payee_name),
+		INDEX idx_is_active (is_active)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='库房与收款人配置表';
+	""",
 	# ========== 新增合同管理表 ==========
 	"""
 	CREATE TABLE IF NOT EXISTS pd_contracts (
