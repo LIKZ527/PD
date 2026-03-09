@@ -943,8 +943,8 @@ class DeliveryService:
 
                     where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
-                    cur.execute(f"SELECT COUNT(*) FROM pd_deliveries {where_sql}", tuple(params))
-                    total = cur.fetchone()[0]
+                    cur.execute(f"SELECT COUNT(*) as total FROM pd_deliveries {where_sql}", tuple(params))
+                    total = cur.fetchone()["total"]
 
                     offset = (page - 1) * page_size
                     cur.execute(f"""
@@ -954,11 +954,10 @@ class DeliveryService:
                         LIMIT %s OFFSET %s
                     """, tuple(params + [page_size, offset]))
 
-                    columns = [desc[0] for desc in cur.description]
                     rows = cur.fetchall()
                     data = []
                     for row in rows:
-                        item = dict(zip(columns, row))
+                        item = dict(row)
                         for key in ['report_date', 'created_at', 'updated_at', 'uploaded_at']:
                             if item.get(key):
                                 item[key] = str(item[key])
