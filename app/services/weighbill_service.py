@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import tempfile
+import uuid
 from decimal import Decimal, ROUND_HALF_UP
 
 from typing import Dict, List, Optional, Any
@@ -463,6 +464,207 @@ class WeighbillService:
             return None
 
         return self.match_delivery_info(weigh_date, vehicle_no)
+
+    def upload_weighbill(
+            self,
+            delivery_id: int,
+            product_name: str,
+            data: Dict[str, Any],
+            image_file: bytes = None,
+            current_user: dict = None,
+            is_manual: bool = False
+    ) -> Dict[str, Any]:
+        """上传或修改磅单，按 delivery_id + product_name 幂等写入。"""
+        temp_file_path = None
+        old_image_path = None
+
+        try:
+            if not delivery_id:
+                return {"success": False, "error": "报单ID不能为空"}
+
+            normalized_product = str(product_name).strip() if product_name is not None else ""
+            if not normalized_product:
+                return {"success": False, "error": "品种名称不能为空"}
+
+            payload = dict(data or {})
+            uploader_id = current_user.get("id") if current_user else None
+            uploader_name = None
+            if current_user:
+                uploader_name = current_user.get("name") or current_user.get("account")
+            uploader_name = uploader_name or "system"
+
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM pd_deliveries WHERE id = %s", (delivery_id,))
+                    if not cur.fetchone():
+                        return {"success": False, "error": f"报单ID {delivery_id} 不存在"}
+
+                    cur.execute(
+                        "SELECT * FROM pd_weighbills WHERE delivery_id = %s AND product_name = %s LIMIT 1",
+                        (delivery_id, normalized_product)
+                    )
+                    existing_row = cur.fetchone()
+                    existing = None
+                    if existing_row:
+                        if isinstance(existing_row, dict):
+                            existing = dict(existing_row)
+                        else:
+                            columns = [desc[0] for desc in cur.description]
+                            existing = dict(zip(columns, existing_row))
+
+                    if image_file:
+                        safe_product = re.sub(r"[^\w\-]", "_", normalized_product) or "product"
+                        filename = (
+                            f"weighbill_{delivery_id}_{safe_product}_"
+                            f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}.jpg"
+                        )
+                        file_path = UPLOAD_DIR / filename
+                        with open(file_path, "wb") as f:
+                            f.write(image_file)
+                        temp_file_path = str(file_path)
+                        old_image_path = existing.get("weighbill_image") if existing else None
+
+                    final_weigh_date = payload.get("weigh_date") if payload.get("weigh_date") is not None else (existing.get("weigh_date") if existing else None)
+                    final_delivery_time = payload.get("delivery_time") if payload.get("delivery_time") is not None else (existing.get("delivery_time") if existing else None)
+                    final_weigh_ticket_no = payload.get("weigh_ticket_no") if payload.get("weigh_ticket_no") is not None else (existing.get("weigh_ticket_no") if existing else None)
+                    final_contract_no = payload.get("contract_no") if payload.get("contract_no") is not None else (existing.get("contract_no") if existing else None)
+                    final_vehicle_no = payload.get("vehicle_no") if payload.get("vehicle_no") is not None else (existing.get("vehicle_no") if existing else None)
+                    final_gross_weight = payload.get("gross_weight") if payload.get("gross_weight") is not None else (existing.get("gross_weight") if existing else None)
+                    final_tare_weight = payload.get("tare_weight") if payload.get("tare_weight") is not None else (existing.get("tare_weight") if existing else None)
+                    final_net_weight = payload.get("net_weight") if payload.get("net_weight") is not None else (existing.get("net_weight") if existing else None)
+                    final_unit_price = payload.get("unit_price") if payload.get("unit_price") is not None else (existing.get("unit_price") if existing else None)
+                    final_image_path = temp_file_path if temp_file_path else (existing.get("weighbill_image") if existing else None)
+
+                    if final_net_weight in (None, ""):
+                        return {"success": False, "error": "净重不能为空"}
+
+                    net_weight_decimal = Decimal(str(final_net_weight)).quantize(Decimal('0.001'), rounding=ROUND_HALF_UP)
+                    gross_weight_decimal = None if final_gross_weight in (None, "") else Decimal(str(final_gross_weight)).quantize(Decimal('0.001'), rounding=ROUND_HALF_UP)
+                    tare_weight_decimal = None if final_tare_weight in (None, "") else Decimal(str(final_tare_weight)).quantize(Decimal('0.001'), rounding=ROUND_HALF_UP)
+                    unit_price_decimal = None if final_unit_price in (None, "") else Decimal(str(final_unit_price)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                    total_amount_decimal = None
+                    if unit_price_decimal is not None:
+                        total_amount_decimal = (unit_price_decimal * net_weight_decimal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+                    final_upload_status = '已上传' if final_image_path else '待上传'
+                    if final_upload_status == '已上传':
+                        final_ocr_status = '已修正' if is_manual else '已确认'
+                    else:
+                        final_ocr_status = '待上传磅单'
+
+                    if existing:
+                        params = [
+                            final_weigh_date,
+                            final_delivery_time,
+                            final_weigh_ticket_no,
+                            final_contract_no,
+                            final_vehicle_no,
+                            gross_weight_decimal,
+                            tare_weight_decimal,
+                            net_weight_decimal,
+                            unit_price_decimal,
+                            total_amount_decimal,
+                            final_image_path,
+                            final_upload_status,
+                            final_ocr_status,
+                            1 if is_manual else existing.get('is_manual_corrected', 0),
+                            uploader_id,
+                            uploader_name,
+                        ]
+
+                        sql = """
+                            UPDATE pd_weighbills
+                            SET weigh_date = %s,
+                                delivery_time = %s,
+                                weigh_ticket_no = %s,
+                                contract_no = %s,
+                                vehicle_no = %s,
+                                gross_weight = %s,
+                                tare_weight = %s,
+                                net_weight = %s,
+                                unit_price = %s,
+                                total_amount = %s,
+                                weighbill_image = %s,
+                                upload_status = %s,
+                                ocr_status = %s,
+                                is_manual_corrected = %s,
+                                uploader_id = %s,
+                                uploader_name = %s,
+                                uploaded_at = CASE WHEN %s = '已上传' THEN NOW() ELSE uploaded_at END,
+                                updated_at = NOW()
+                            WHERE id = %s
+                        """
+                        params.extend([final_upload_status, existing['id']])
+                        cur.execute(sql, tuple(params))
+                        weighbill_id = existing['id']
+                        action = 'updated'
+                    else:
+                        sql = """
+                            INSERT INTO pd_weighbills (
+                                weigh_date, delivery_time, weigh_ticket_no, contract_no,
+                                delivery_id, vehicle_no, product_name, gross_weight,
+                                tare_weight, net_weight, unit_price, total_amount,
+                                weighbill_image, upload_status, ocr_status,
+                                is_manual_corrected, uploader_id, uploader_name, uploaded_at
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        """
+                        cur.execute(
+                            sql,
+                            (
+                                final_weigh_date,
+                                final_delivery_time,
+                                final_weigh_ticket_no,
+                                final_contract_no,
+                                delivery_id,
+                                final_vehicle_no,
+                                normalized_product,
+                                gross_weight_decimal,
+                                tare_weight_decimal,
+                                net_weight_decimal,
+                                unit_price_decimal,
+                                total_amount_decimal,
+                                final_image_path,
+                                final_upload_status,
+                                final_ocr_status,
+                                1 if is_manual else 0,
+                                uploader_id,
+                                uploader_name,
+                            )
+                        )
+                        weighbill_id = cur.lastrowid
+                        action = 'created'
+
+            if temp_file_path and old_image_path and old_image_path != temp_file_path and os.path.exists(old_image_path):
+                try:
+                    os.remove(old_image_path)
+                except Exception as e:
+                    logger.warning(f"删除旧磅单图片失败: {e}")
+
+            return {
+                "success": True,
+                "message": "磅单上传成功" if action == 'created' else "磅单修改成功",
+                "data": {
+                    "weighbill_id": weighbill_id,
+                    "delivery_id": delivery_id,
+                    "product_name": normalized_product,
+                    "upload_status": final_upload_status,
+                    "ocr_status": final_ocr_status,
+                    "is_manual_corrected": 1 if is_manual else 0,
+                    "unit_price": float(unit_price_decimal) if unit_price_decimal is not None else None,
+                    "net_weight": float(net_weight_decimal),
+                    "total_amount": float(total_amount_decimal) if total_amount_decimal is not None else None,
+                    "weighbill_image": final_image_path,
+                }
+            }
+
+        except Exception as e:
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except Exception:
+                    pass
+            logger.error(f"上传/修改磅单失败: {e}")
+            return {"success": False, "error": str(e)}
 
     def batch_upload_weighbills(
             self,
