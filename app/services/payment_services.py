@@ -767,7 +767,6 @@ class PaymentService:
                         
                         -- ========== 其他必要字段 ==========
                         pd.id as payment_detail_id,
-                        b.id as balance_id,
                         wb.id as weighbill_id,
                         d.id as delivery_id,
                         pd.total_amount as 应收总额,
@@ -972,6 +971,7 @@ class PaymentService:
                         
                         -- ========== 其他必要字段 ==========
                         pd.id as payment_detail_id,
+                        b.id as balance_id,
                         wb.id as weighbill_id,
                         d.id as delivery_id,
                         pd.unpaid_amount as 未打款金额,
@@ -991,6 +991,7 @@ class PaymentService:
                     FROM {PaymentService.TABLE_NAME} pd
                     LEFT JOIN pd_deliveries d ON d.id = pd.delivery_id
                     LEFT JOIN pd_weighbills wb ON wb.id = pd.weighbill_id
+                    LEFT JOIN pd_balance_details b ON b.weighbill_id = wb.id
                     WHERE {where_sql}
                     ORDER BY pd.created_at DESC
                     LIMIT %s OFFSET %s
