@@ -383,173 +383,270 @@ class WeighbillService:
 
     # ========== 核心：上传/修改磅单 ==========
 
-    def upload_weighbill(self, delivery_id: int, product_name: str,
-                         data: Dict, image_file: bytes = None,
-                         current_user: dict = None, is_manual: bool = False) -> Dict[str, Any]:
-        """
-        上传磅单（按品种上传）
-        一个报单ID + 一个品种 = 唯一磅单记录
-        """
-        image_path = None
-
+    def get_warehouse_payees(self, warehouse_name: str) -> Dict[str, Any]:
+        """查询库房的所有收款人"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # 检查报单是否存在
                     cur.execute("""
-                        SELECT d.*, w.id as existing_weighbill_id, w.weighbill_image
-                        FROM pd_deliveries d
-                        LEFT JOIN pd_weighbills w ON w.delivery_id = d.id AND w.product_name = %s
-                        WHERE d.id = %s
-                    """, (product_name, delivery_id))
-
-                    row = cur.fetchone()
-                    if not row:
-                        return {"success": False, "error": "报单不存在"}
-
+                        SELECT id, warehouse_name, payee_name, payee_account, payee_bank_name, is_active
+                        FROM pd_warehouse_payees
+                        WHERE warehouse_name = %s
+                        ORDER BY is_active DESC, id ASC
+                    """, (warehouse_name,))
+                    
                     columns = [desc[0] for desc in cur.description]
-                    delivery_info = dict(zip(columns, row))
-                    existing_weighbill_id = delivery_info.get('existing_weighbill_id')
-                    existing_image = delivery_info.get('weighbill_image')
-
-                    delivery_updates = {}
-                    if "warehouse" in data and data.get("warehouse") is not None:
-                        delivery_updates["warehouse"] = data.get("warehouse")
-                    if "payee" in data and data.get("payee") is not None:
-                        delivery_updates["payee"] = data.get("payee")
-
-                    if delivery_updates:
-                        update_fields = [f"{k} = %s" for k in delivery_updates.keys()]
-                        params = list(delivery_updates.values()) + [delivery_id]
-                        cur.execute(
-                            f"UPDATE pd_deliveries SET {', '.join(update_fields)} WHERE id = %s",
-                            tuple(params)
-                        )
-                        delivery_info.update(delivery_updates)
-
-                    # 操作人信息
-                    uploader_id = None
-                    uploader_name = "system"
-                    if current_user:
-                        uploader_id = current_user.get("id")
-                        uploader_name = current_user.get("name") or current_user.get("account") or "system"
-
-                    # 处理图片
-                    if image_file:
-                        file_ext = ".jpg"
-                        safe_name = re.sub(r'[^\w\-]', '_', f"{delivery_id}_{product_name}")
-                        filename = f"weighbill_{safe_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}{file_ext}"
-                        file_path = UPLOAD_DIR / filename
-                        with open(file_path, "wb") as f:
-                            f.write(image_file)
-                        image_path = str(file_path)
-
-                    # 计算金额
-                    unit_price = data.get('unit_price')
-                    net_weight = data.get('net_weight')
-                    total_amount = None
-                    if unit_price and net_weight:
-                        total_amount = round(float(unit_price) * float(net_weight), 2)
-
-                    # 更新或插入
-                    if existing_weighbill_id:
-                        # 修改现有记录
-                        update_fields = []
-                        params = []
-
-                        fields = ['weigh_date', 'weigh_ticket_no', 'contract_no', 'vehicle_no',
-                                  'gross_weight', 'tare_weight', 'net_weight', 'delivery_time',
-                                  'unit_price', 'total_amount', 'ocr_raw_data']
-
-                        for f in fields:
-                            if f in data:
-                                update_fields.append(f"{f} = %s")
-                                params.append(data[f])
-
-                        if image_path:
-                            update_fields.append("weighbill_image = %s")
-                            params.append(image_path)
-                            if existing_image and os.path.exists(existing_image):
-                                try:
-                                    os.remove(existing_image)
-                                except:
-                                    pass
-
-                        update_fields.extend([
-                            "upload_status = %s", "ocr_status = %s",
-                            "uploader_id = %s", "uploader_name = %s", "uploaded_at = NOW()"
-                        ])
-                        params.extend(['已上传', '已上传磅单', uploader_id, uploader_name])
-
-                        if is_manual:
-                            update_fields.append("is_manual_corrected = %s")
-                            params.append(1)
-
-                        params.append(existing_weighbill_id)
-                        sql = f"UPDATE pd_weighbills SET {', '.join(update_fields)} WHERE id = %s"
-                        cur.execute(sql, tuple(params))
-
-                        weighbill_id = existing_weighbill_id
-                        message = "磅单修改成功"
-                    else:
-                        # 首次上传（插入新记录）
-                        cur.execute("""
-                            INSERT INTO pd_weighbills 
-                            (delivery_id, weigh_date, delivery_time, weigh_ticket_no, contract_no,
-                             vehicle_no, product_name, gross_weight, tare_weight, net_weight,
-                             unit_price, total_amount, weighbill_image, upload_status, ocr_status,
-                             ocr_raw_data, is_manual_corrected, uploader_id, uploader_name, uploaded_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                        """, (
-                            delivery_id, data.get('weigh_date'), data.get('delivery_time'),
-                            data.get('weigh_ticket_no'), data.get('contract_no'),
-                            data.get('vehicle_no'), product_name,
-                            data.get('gross_weight'), data.get('tare_weight'), data.get('net_weight'),
-                            unit_price, total_amount, image_path,
-                            '已上传', '已上传磅单', data.get('raw_text'),
-                            1 if is_manual else 0, uploader_id, uploader_name,
-                        ))
-                        weighbill_id = cur.lastrowid
-                        message = "磅单上传成功"
-
-                    # 检查是否全部上传完成
-                    cur.execute("""
-                        SELECT COUNT(*) FROM pd_weighbills 
-                        WHERE delivery_id = %s AND upload_status = '已上传'
-                    """, (delivery_id,))
-                    uploaded_count = cur.fetchone()[0]
-
-                    products = []
-                    if delivery_info.get('products'):
-                        products = [p.strip() for p in delivery_info['products'].split(',') if p.strip()]
-
-                    all_uploaded = uploaded_count >= len(products) if products else uploaded_count > 0
-
+                    rows = cur.fetchall()
+                    payees = [dict(zip(columns, row)) for row in rows]
+                    
                     return {
                         "success": True,
-                        "message": message,
-                        "data": {
-                            "weighbill_id": weighbill_id,
-                            "delivery_id": delivery_id,
-                            "product_name": product_name,
-                            "upload_status": "已上传",
-                            "ocr_status": "已上传磅单",
-                            "unit_price": unit_price,
-                            "total_amount": total_amount,
-                            "all_uploaded": all_uploaded,
-                            "uploaded_count": uploaded_count,
-                            "total_count": len(products)
-                        }
+                        "count": len(payees),
+                        "payees": payees
                     }
+                    
+        except Exception as e:
+            logger.error(f"查询库房收款人失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _get_payee_by_id(self, payee_id: int) -> Optional[Dict]:
+        """根据ID获取收款人详情"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT id, warehouse_name, payee_name, payee_account, payee_bank_name, is_active
+                        FROM pd_warehouse_payees
+                        WHERE id = %s
+                    """, (payee_id,))
+                    row = cur.fetchone()
+                    if row:
+                        columns = [desc[0] for desc in cur.description]
+                        return dict(zip(columns, row))
+                    return None
+        except Exception as e:
+            logger.error(f"查询收款人失败: {e}")
+            return None
+
+    def _recognize_from_bytes(self, image_bytes: bytes) -> Dict[str, Any]:
+        """从字节流识别磅单"""
+        temp_path = None
+        try:
+            # 保存临时文件
+            temp_path = tempfile.mktemp(suffix=".jpg")
+            with open(temp_path, "wb") as f:
+                f.write(image_bytes)
+
+            # 预处理并识别
+            processed_path = self.preprocess_image(temp_path)
+            result = self.recognize_weighbill(processed_path)
+
+            # 清理临时文件
+            if processed_path != temp_path and os.path.exists(processed_path):
+                os.remove(processed_path)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+            return result
 
         except Exception as e:
-            if image_path and os.path.exists(image_path):
-                try:
-                    os.remove(image_path)
-                except:
-                    pass
-            logger.error(f"上传磅单失败: {e}")
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
             return {"success": False, "error": str(e)}
+
+    def _match_delivery_by_ocr(self, ocr_data: Dict) -> Optional[Dict]:
+        """根据OCR数据匹配报单"""
+        weigh_date = ocr_data.get("weigh_date")
+        vehicle_no = ocr_data.get("vehicle_no")
+
+        if not weigh_date or not vehicle_no:
+            return None
+
+        return self.match_delivery_info(weigh_date, vehicle_no)
+
+    def batch_upload_weighbills(
+            self,
+            warehouse_name: str,
+            payee_id: Optional[int],
+            image_files: List[bytes],
+            current_user: dict = None
+    ) -> Dict[str, Any]:
+        """
+        批量上传磅单（支持自动选择或指定收款人）
+        
+        如果 payee_id 为 None：
+            - 查询该库房收款人，1个则直接用，多个则返回选择列表
+        如果 payee_id 不为 None：
+            - 使用指定的收款人进行批量上传
+        """
+        
+        # 阶段1：检查收款人（当 payee_id 为空时）
+        if payee_id is None:
+            payees_result = self.get_warehouse_payees(warehouse_name)
+            
+            if not payees_result.get("success"):
+                return payees_result
+            
+            payees = payees_result.get("payees", [])
+            count = len(payees)
+            
+            if count == 0:
+                return {
+                    "success": False,
+                    "error": f"库房 '{warehouse_name}' 未找到收款人信息，请先配置"
+                }
+            
+            elif count == 1:
+                # 只有一个，直接使用
+                payee_info = payees[0]
+                payee_id = payee_info["id"]
+                
+            else:
+                # 多个收款人，返回让用户选择
+                return {
+                    "success": True,
+                    "need_select_payee": True,  # 标记需要选择
+                    "message": f"库房 '{warehouse_name}' 有 {count} 个收款人，请选择",
+                    "warehouse_name": warehouse_name,
+                    "payees": [
+                        {
+                            "id": p["id"],
+                            "payee_name": p["payee_name"],
+                            "payee_account": p.get("payee_account", ""),
+                            "payee_bank_name": p.get("payee_bank_name", ""),
+                            "is_active": p.get("is_active", 1)
+                        }
+                        for p in payees
+                    ]
+                }
+        
+        # 阶段2：使用指定的 payee_id 进行批量上传
+        # 验证收款人是否存在且属于该库房
+        payee_info = self._get_payee_by_id(payee_id)
+        if not payee_info:
+            return {
+                "success": False,
+                "error": f"收款人ID {payee_id} 不存在"
+            }
+        
+        if payee_info.get("warehouse_name") != warehouse_name:
+            return {
+                "success": False,
+                "error": f"收款人ID {payee_id} 不属于库房 '{warehouse_name}'"
+            }
+        
+        # 开始批量处理
+        fixed_payee = payee_info.get("payee_name", "")
+        
+        results = {
+            "success": True,
+            "need_select_payee": False,
+            "warehouse_name": warehouse_name,
+            "payee_id": payee_id,
+            "payee_name": fixed_payee,
+            "total": len(image_files),
+            "success_count": 0,
+            "failed_count": 0,
+            "success_list": [],
+            "failed_list": []
+        }
+
+        # 逐张处理图片
+        for idx, image_bytes in enumerate(image_files):
+            try:
+                # OCR识别
+                ocr_result = self._recognize_from_bytes(image_bytes)
+                if not ocr_result.get("success"):
+                    results["failed_list"].append({
+                        "index": idx,
+                        "filename": f"image_{idx}",
+                        "error": ocr_result.get("error", "OCR识别失败")
+                    })
+                    results["failed_count"] += 1
+                    continue
+
+                ocr_data = ocr_result.get("data", {})
+
+                # 自动匹配报单
+                delivery_info = self._match_delivery_by_ocr(ocr_data)
+                if not delivery_info:
+                    results["failed_list"].append({
+                        "index": idx,
+                        "filename": f"image_{idx}",
+                        "weigh_ticket_no": ocr_data.get("weigh_ticket_no"),
+                        "vehicle_no": ocr_data.get("vehicle_no"),
+                        "weigh_date": ocr_data.get("weigh_date"),
+                        "error": "未找到匹配的报单（请检查日期和车牌号）"
+                    })
+                    results["failed_count"] += 1
+                    continue
+
+                delivery_id = delivery_info["id"]
+                product_name = ocr_data.get("product_name") or delivery_info.get("product_name", "废电瓶")
+
+                # 获取合同单价
+                contract_no = ocr_data.get("contract_no") or delivery_info.get("contract_no")
+                unit_price = self.get_contract_price_by_product(contract_no, product_name)
+
+                # 构建磅单数据
+                weighbill_data = {
+                    "weigh_date": ocr_data.get("weigh_date"),
+                    "weigh_ticket_no": ocr_data.get("weigh_ticket_no"),
+                    "contract_no": contract_no,
+                    "vehicle_no": ocr_data.get("vehicle_no"),
+                    "gross_weight": ocr_data.get("gross_weight"),
+                    "tare_weight": ocr_data.get("tare_weight"),
+                    "net_weight": ocr_data.get("net_weight"),
+                    "delivery_time": ocr_data.get("delivery_time"),
+                    "unit_price": unit_price,
+                    "warehouse": warehouse_name,
+                    "payee": fixed_payee,
+                }
+
+                # 上传磅单（复用现有的 upload_weighbill 方法）
+                upload_result = self.upload_weighbill(
+                    delivery_id=delivery_id,
+                    product_name=product_name,
+                    data=weighbill_data,
+                    image_file=image_bytes,
+                    current_user=current_user,
+                    is_manual=False
+                )
+
+                if upload_result.get("success"):
+                    result_data = upload_result.get("data", {})
+                    results["success_list"].append({
+                        "index": idx,
+                        "weighbill_id": result_data.get("weighbill_id"),
+                        "delivery_id": delivery_id,
+                        "product_name": product_name,
+                        "vehicle_no": ocr_data.get("vehicle_no"),
+                        "weigh_ticket_no": ocr_data.get("weigh_ticket_no"),
+                        "net_weight": ocr_data.get("net_weight"),
+                        "unit_price": unit_price,
+                        "total_amount": result_data.get("total_amount"),
+                        "payee": fixed_payee,
+                        "warehouse": warehouse_name,
+                    })
+                    results["success_count"] += 1
+                else:
+                    results["failed_list"].append({
+                        "index": idx,
+                        "filename": f"image_{idx}",
+                        "error": upload_result.get("error", "上传失败")
+                    })
+                    results["failed_count"] += 1
+
+            except Exception as e:
+                logger.error(f"处理第{idx}张图片失败: {e}")
+                results["failed_list"].append({
+                    "index": idx,
+                    "filename": f"image_{idx}",
+                    "error": str(e)
+                })
+                results["failed_count"] += 1
+
+        return results
 
     # ========== 查询 ==========
 

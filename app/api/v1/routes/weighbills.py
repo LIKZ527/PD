@@ -134,6 +134,31 @@ class PaymentScheduleRequest(BaseModel):
     payment_schedule_date: str = Field(..., description="排款日期，格式：YYYY-MM-DD")
 
 
+class PayeeOption(BaseModel):
+    """收款人选项"""
+    id: int
+    payee_name: str
+    payee_account: Optional[str] = ""
+    payee_bank_name: Optional[str] = ""
+    is_active: int = 1
+
+
+class WeighbillBatchUploadResponse(BaseModel):
+    """批量上传磅单响应"""
+    success: bool
+    need_select_payee: bool = False  # 是否需要选择收款人
+    message: str
+    warehouse_name: Optional[str] = None
+    payees: Optional[List[PayeeOption]] = None  # 需要选择时返回
+    payee_id: Optional[int] = None  # 已选择时返回
+    payee_name: Optional[str] = None  # 已选择时返回
+    total: int = 0
+    success_count: int = 0
+    failed_count: int = 0
+    success_list: List[Dict] = []
+    failed_list: List[Dict] = []
+
+
 # ============ 路由 ============
 
 @router.post("/ocr", response_model=WeighbillOCRResponse)
@@ -577,3 +602,88 @@ async def set_payment_schedule(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@router.post("/batch-upload", response_model=WeighbillBatchUploadResponse, summary="批量上传磅单")
+async def batch_upload_weighbills(
+    warehouse_name: str = Form(..., description="库房名称（将自动关联该库房的收款人）"),
+    payee_id: Optional[int] = Form(None, description="收款人ID（首次不传，当返回need_select_payee=true时，选择后传入）"),
+    weighbill_images: List[UploadFile] = File(..., description="磅单图片列表（支持多张）"),
+    service: WeighbillService = Depends(get_weighbill_service),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    批量上传磅单接口（支持多收款人选择）
+    
+    与单条上传接口 /create 并存，本接口用于批量处理
+    
+    调用流程：
+    1. 首次调用：只传 warehouse_name + 图片
+       - 如果该库房只有1个收款人：直接处理
+       - 如果该库房有多个收款人：返回 need_select_payee=true + payees列表
+    
+    2. 二次调用：传 warehouse_name + payee_id（用户选择的）+ 图片
+       - 使用指定的收款人批量处理所有磅单
+    
+    每张磅单自动：
+    - OCR识别：日期、车号、合同号、品种、重量等
+    - 匹配报单：根据【日期+车牌号】匹配 pd_deliveries
+    - 获取单价：根据合同号+品种查询 pd_contract_products
+    - 创建收款明细和结余明细（复用单条上传的逻辑）
+    """
+    try:
+        if not weighbill_images:
+            raise HTTPException(status_code=400, detail="请至少上传一张磅单图片")
+
+        # 读取所有图片字节
+        image_bytes_list = []
+        for image_file in weighbill_images:
+            allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/bmp"]
+            if image_file.content_type not in allowed_types:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"不支持的文件格式: {image_file.filename}，仅支持jpg/png/bmp"
+                )
+            
+            content = await image_file.read()
+            image_bytes_list.append(content)
+
+        # 调用批量上传服务
+        result = service.batch_upload_weighbills(
+            warehouse_name=warehouse_name,
+            payee_id=payee_id,
+            image_files=image_bytes_list,
+            current_user=current_user
+        )
+
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error"))
+
+        # 需要选择收款人
+        if result.get("need_select_payee"):
+            return WeighbillBatchUploadResponse(
+                success=True,
+                need_select_payee=True,
+                message=result.get("message", "请选择收款人"),
+                warehouse_name=result.get("warehouse_name"),
+                payees=result.get("payees", [])
+            )
+
+        # 处理完成
+        return WeighbillBatchUploadResponse(
+            success=True,
+            need_select_payee=False,
+            message=f"批量上传完成：成功 {result['success_count']}/{result['total']} 条",
+            warehouse_name=result.get("warehouse_name"),
+            payee_id=result.get("payee_id"),
+            payee_name=result.get("payee_name"),
+            total=result["total"],
+            success_count=result["success_count"],
+            failed_count=result["failed_count"],
+            success_list=result["success_list"],
+            failed_list=result["failed_list"]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"批量上传失败: {str(e)}")
