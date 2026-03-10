@@ -563,10 +563,12 @@ class WeighbillService:
                                d.driver_name, d.driver_phone, d.driver_id_card,
                                d.has_delivery_order, d.shipper, d.payee, d.reporter_name,
                                d.service_fee, d.contract_no as d_contract_no,
-                               pd.collection_status, pd.is_paid_out
+                               pd.collection_status, pd.is_paid_out,
+                               b.payout_status
                         FROM pd_weighbills w
                         LEFT JOIN pd_deliveries d ON w.delivery_id = d.id
                         LEFT JOIN pd_payment_details pd ON pd.weighbill_id = w.id
+                        LEFT JOIN pd_balance_details b ON b.weighbill_id = w.id
                         WHERE w.id = %s
                     """, (weighbill_id,))
                     row = cur.fetchone()
@@ -590,8 +592,11 @@ class WeighbillService:
                     data["is_manual_corrected_display"] = "是" if data.get("is_manual_corrected") == 1 else "否"
                     data["ocr_status_display"] = data.get("ocr_status", "待上传磅单")
                     data["has_delivery_order_display"] = "是" if data.get("has_delivery_order") == "有" else "否"
-                    if data.get("is_paid_out") is not None:
-                        data["is_paid_out_display"] = "已打款" if data.get("is_paid_out") == 1 else "待打款"
+                    payout_status = data.get("payout_status")
+                    if payout_status is None:
+                        payout_status = data.get("is_paid_out")
+                    if payout_status is not None:
+                        data["is_paid_out_display"] = "已打款" if payout_status == 1 else "待打款"
                     if data.get("collection_status") is not None:
                         collection_map = {
                             0: "待回款",
@@ -715,6 +720,7 @@ class WeighbillService:
                                d.has_delivery_order, d.shipper, d.payee, d.reporter_name,
                                d.service_fee,
                                b.schedule_status,
+                               b.payout_status,
                                b.payable_amount as balance_payable_amount,
                                pd.collection_status, pd.is_paid_out
                         FROM pd_weighbills w
@@ -755,8 +761,11 @@ class WeighbillService:
                         wb["is_manual_corrected_display"] = "是" if wb.get("is_manual_corrected") == 1 else "否"
                         wb["ocr_status_display"] = wb.get("ocr_status", "待上传磅单")
                         wb["has_delivery_order_display"] = "是" if wb.get("has_delivery_order") == "有" else "否"
-                        if wb.get("is_paid_out") is not None:
-                            wb["is_paid_out_display"] = "已打款" if wb.get("is_paid_out") == 1 else "待打款"
+                        payout_status = wb.get("payout_status")
+                        if payout_status is None:
+                            payout_status = wb.get("is_paid_out")
+                        if payout_status is not None:
+                            wb["is_paid_out_display"] = "已打款" if payout_status == 1 else "待打款"
                         if wb.get("collection_status") is not None:
                             collection_map = {
                                 0: "待回款",

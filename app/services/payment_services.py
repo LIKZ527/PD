@@ -873,8 +873,11 @@ class PaymentService:
                     params.append(end_date)
 
                 # 打款状态筛选
-                if is_paid_out is not None and has_is_paid_out:
-                    where_clauses.append("pd.is_paid_out = %s")
+                if is_paid_out is not None:
+                    if has_is_paid_out:
+                        where_clauses.append("COALESCE(b.payout_status, pd.is_paid_out, 0) = %s")
+                    else:
+                        where_clauses.append("COALESCE(b.payout_status, 0) = %s")
                     params.append(is_paid_out)
 
                 # 排期日期筛选
@@ -914,7 +917,7 @@ class PaymentService:
                 offset = (page - 1) * size
                 payee_select = "COALESCE(b.payee_name, pd.payee, d.payee)" if has_payee else "COALESCE(b.payee_name, d.payee)"
                 payee_account_select = "COALESCE(b.payee_account, pd.payee_account)" if has_payee_account else "b.payee_account"
-                is_paid_out_select = "pd.is_paid_out" if has_is_paid_out else "0"
+                is_paid_out_select = "COALESCE(b.payout_status, pd.is_paid_out, 0)" if has_is_paid_out else "COALESCE(b.payout_status, 0)"
                 query_sql = f"""
                     SELECT 
                         -- ========== 第一行：排期信息 ==========
@@ -981,7 +984,7 @@ class PaymentService:
                         b.id as balance_id,
                         wb.id as weighbill_id,
                         d.id as delivery_id,
-                        pd.unpaid_amount as 未打款金额,
+                        COALESCE(b.balance_amount, pd.unpaid_amount, 0) as 未打款金额,
                         pd.created_at,
                         pd.updated_at,
 

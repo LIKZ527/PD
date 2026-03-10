@@ -790,7 +790,8 @@ class BalanceService:
                 with conn.cursor() as cur:
                     # 主表
                     cur.execute("""
-                        SELECT b.*, w.weighbill_image, d.payee as payee_name
+                        SELECT b.*, w.weighbill_image,
+                               COALESCE(b.payee_name, d.payee) as payee_name
                         FROM pd_balance_details b
                         LEFT JOIN pd_weighbills w ON b.weighbill_id = w.id
                         LEFT JOIN pd_deliveries d ON b.delivery_id = d.id
