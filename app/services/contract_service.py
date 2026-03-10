@@ -668,6 +668,8 @@ class ContractService:
         exact_contract_no: Optional[str] = None,
         exact_smelter_company: Optional[str] = None,
         exact_status: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
         fuzzy_keywords: Optional[str] = None,
     ) -> Dict[str, Any]:
         """获取合同列表（分页）"""
@@ -686,6 +688,12 @@ class ContractService:
                     if exact_status:
                         where_clauses.append("c.status = %s")
                         params.append(exact_status)
+                    if date_from:
+                        where_clauses.append("c.contract_date >= %s")
+                        params.append(date_from)
+                    if date_to:
+                        where_clauses.append("c.contract_date <= %s")
+                        params.append(date_to)
 
                     if fuzzy_keywords:
                         tokens = [t for t in fuzzy_keywords.split() if t]
