@@ -642,7 +642,6 @@ def get_role_templates(current_user: dict = Depends(get_current_user)):
                 {
                     'field': field,
                     'label': PermissionService.get_label(field),
-                    'label': PermissionService.get_label(field),
                     'value': bool(perms.get(field, 0))
                 }
                 for field in PermissionService.get_all_fields()
@@ -656,7 +655,6 @@ def get_role_templates(current_user: dict = Depends(get_current_user)):
         "permission_fields": [
             {
                 'field': field,
-                'label': PermissionService.get_label(field)
                 'label': PermissionService.get_label(field)
             }
             for field in PermissionService.get_all_fields()
