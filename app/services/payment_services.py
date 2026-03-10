@@ -890,7 +890,7 @@ class PaymentService:
                         where_clauses.append("wb.payment_schedule_date IS NULL")
 
                 if keyword:
-                    payee_filter = "COALESCE(pd.payee, d.payee)" if has_payee else "d.payee"
+                    payee_filter = "COALESCE(b.payee_name, pd.payee, d.payee)" if has_payee else "COALESCE(b.payee_name, d.payee)"
                     where_clauses.append(
                         f"(pd.contract_no LIKE %s OR pd.smelter_name LIKE %s OR wb.weigh_ticket_no LIKE %s OR d.driver_name LIKE %s OR {payee_filter} LIKE %s)")
                     keyword_pattern = f"%{keyword}%"
@@ -912,8 +912,8 @@ class PaymentService:
 
                 # 分页查询 - 打款信息列表字段
                 offset = (page - 1) * size
-                payee_select = "COALESCE(pd.payee, d.payee)" if has_payee else "d.payee"
-                payee_account_select = "pd.payee_account" if has_payee_account else "NULL"
+                payee_select = "COALESCE(b.payee_name, pd.payee, d.payee)" if has_payee else "COALESCE(b.payee_name, d.payee)"
+                payee_account_select = "COALESCE(b.payee_account, pd.payee_account)" if has_payee_account else "b.payee_account"
                 is_paid_out_select = "pd.is_paid_out" if has_is_paid_out else "0"
                 query_sql = f"""
                     SELECT 
@@ -947,7 +947,7 @@ class PaymentService:
                             END,
                             0
                         ) as 应打款金额,
-                        pd.paid_amount as 已打款金额,  -- 注意：这里用paid_amount表示已打款
+                        COALESCE(b.paid_amount, pd.paid_amount, 0) as 已打款金额,
                         {payee_select} as 收款人,
                         {payee_account_select} as 收款人账号,
                         CASE
