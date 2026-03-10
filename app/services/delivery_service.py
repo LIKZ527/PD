@@ -27,6 +27,18 @@ STANDARD_TRUCK_CAPACITY = Decimal('35')
 class DeliveryService:
     """报货订单服务"""
 
+    def _normalize_driver_id_card(self, value: Optional[Any]) -> Optional[str]:
+        """清洗司机身份证号，避免将无效超长值写入数据库。"""
+        if value is None:
+            return None
+
+        normalized = str(value).strip()
+        if normalized == "":
+            return None
+
+        normalized = re.sub(r"\s+", "", normalized).upper()
+        return normalized
+
     def _normalize_has_delivery_order(self, value: Optional[str]) -> Optional[str]:
         """将联单状态统一为数据库可接受值：有/无。"""
         if value is None:
@@ -453,11 +465,15 @@ class DeliveryService:
 
         try:
             driver_phone = data.get('driver_phone') if data else None
-            driver_id_card = data.get('driver_id_card') if data else None
+            driver_id_card = self._normalize_driver_id_card(data.get('driver_id_card')) if data else None
 
             # 参数防御性检查
             if data is None:
                 return {"success": False, "error": "请求数据不能为空"}
+
+            data['driver_id_card'] = driver_id_card
+            if driver_id_card and len(driver_id_card) > 18:
+                return {"success": False, "error": "司机身份证号长度不能超过18位"}
 
             logger.info(f"【DEBUG】create_delivery 开始，data={data}, current_user={current_user}")
 
@@ -493,7 +509,8 @@ class DeliveryService:
             # 24小时重复校验
             if not confirm_flag:
                 driver_phone = data.get('driver_phone')
-                driver_id_card = data.get('driver_id_card')
+                driver_id_card = self._normalize_driver_id_card(data.get('driver_id_card'))
+                data['driver_id_card'] = driver_id_card
 
                 logger.info(f"【DEBUG】检查重复，driver_phone={driver_phone}, driver_id_card={driver_id_card}")
 
@@ -743,6 +760,12 @@ class DeliveryService:
                     has_order = self._normalize_has_delivery_order(data.get('has_delivery_order', old_has_order))
                     if has_order not in ('有', '无'):
                         return {"success": False, "error": "has_delivery_order 仅支持：有/无（或 是/否）"}
+
+                    if 'driver_id_card' in data:
+                        data['driver_id_card'] = self._normalize_driver_id_card(data.get('driver_id_card'))
+                        if data['driver_id_card'] and len(data['driver_id_card']) > 18:
+                            return {"success": False, "error": "司机身份证号长度不能超过18位"}
+
                     if 'has_delivery_order' in data:
                         data['has_delivery_order'] = has_order
                     if 'has_delivery_order' in data or uploaded_by:
