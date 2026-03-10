@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import tempfile
+from decimal import Decimal, ROUND_HALF_UP
 
 from typing import Dict, List, Optional, Any
 from datetime import datetime
@@ -714,6 +715,7 @@ class WeighbillService:
                                d.has_delivery_order, d.shipper, d.payee, d.reporter_name,
                                d.service_fee,
                                b.schedule_status,
+                               b.payable_amount as balance_payable_amount,
                                pd.collection_status, pd.is_paid_out
                         FROM pd_weighbills w
                         JOIN pd_deliveries d ON w.delivery_id = d.id
@@ -739,6 +741,16 @@ class WeighbillService:
                         for key in ["gross_weight", "tare_weight", "net_weight", "unit_price", "total_amount", "service_fee"]:
                             if wb.get(key):
                                 wb[key] = float(wb[key])
+
+                        # 应打款金额：优先使用结余表应付金额；无结余时按公式估算
+                        if wb.get("balance_payable_amount") is not None:
+                            wb["payable_amount"] = float(wb.get("balance_payable_amount") or 0)
+                        else:
+                            net_weight = Decimal(str(wb.get("net_weight") or 0))
+                            unit_price = Decimal(str(wb.get("unit_price") or 0))
+                            wb["payable_amount"] = float(
+                                (net_weight * unit_price / Decimal('1.03')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                            )
 
                         wb["is_manual_corrected_display"] = "是" if wb.get("is_manual_corrected") == 1 else "否"
                         wb["ocr_status_display"] = wb.get("ocr_status", "待上传磅单")
@@ -817,6 +829,7 @@ class WeighbillService:
                             "payee": delivery.get("payee"),
                             "warehouse": delivery.get("warehouse"),
                             "service_fee": delivery.get("service_fee"),
+                            "payable_amount": round(sum((wb.get("payable_amount") or 0) for wb in weighbills), 2),
                             "total_weighbills": delivery.get("total_weighbills", 0),
                             "uploaded_weighbills": delivery.get("uploaded_weighbills", 0),
                             "weighbills": weighbills

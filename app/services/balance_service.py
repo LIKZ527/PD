@@ -3,7 +3,7 @@
 """
 import logging
 import tempfile
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Optional, Any
 
 from PIL import Image, ImageEnhance, ImageFilter
@@ -52,7 +52,7 @@ class BalanceService:
                                  weighbill_id: int = None) -> Dict[str, Any]:
         """
         根据磅单数据自动生成结余明细
-        应付金额 = 净重 × 合同单价
+        应付金额 = (净重 × 合同单价) / 1.03，默认保留两位小数
         """
         try:
             with get_conn() as conn:
@@ -64,9 +64,9 @@ class BalanceService:
                     if contract_no:
                         conditions.append("w.contract_no = %s")
                         params.append(contract_no)
-                        if delivery_id:
-                            conditions.append("w.delivery_id = %s")
-                            params.append(delivery_id)
+                    if delivery_id:
+                        conditions.append("w.delivery_id = %s")
+                        params.append(delivery_id)
                     if weighbill_id:
                         conditions.append("w.id = %s")
                         params.append(weighbill_id)
@@ -106,7 +106,10 @@ class BalanceService:
                         # 计算应付金额
                         net_weight = data.get('net_weight') or 0
                         unit_price = data.get('unit_price') or 0
-                        payable = Decimal(str(net_weight)) * Decimal(str(unit_price))
+                        # 应付金额按税率换算并保留两位小数
+                        payable = (
+                            Decimal(str(net_weight)) * Decimal(str(unit_price)) / Decimal('1.03')
+                        ).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
                         # 确定收款人姓名：优先payee，否则driver_name
                         receiver_name = data.get('payee') if data.get('payee') else data.get('driver_name')
@@ -1225,6 +1228,9 @@ class BalanceService:
                             if item.get(key) is not None:
                                 item[key] = float(item[key])
 
+                        # 兼容前端字段：应打款金额
+                        item['payable_amount'] = item.get('total_payable', 0.0)
+
                         # 转换时间
                         for key in ['first_bill_date', 'last_bill_date']:
                             if item.get(key):
@@ -1832,6 +1838,9 @@ class BalanceService:
                             if item.get(key) is not None:
                                 item[key] = float(item[key])
 
+                        # 应打款金额（按报单人汇总）
+                        item['payable_amount'] = item.get('total_payable', 0.0)
+
                         for key in ['first_bill_date', 'last_bill_date']:
                             if item.get(key):
                                 item[key] = str(item[key])
@@ -1857,7 +1866,8 @@ class BalanceService:
                         "page_size": page_size,
                         "summary": {
                             "total_reporters": total,
-                            "total_balance": sum(d.get('total_balance', 0) for d in data)
+                            "total_balance": sum(d.get('total_balance', 0) for d in data),
+                            "total_payable_amount": sum(d.get('payable_amount', 0) for d in data)
                         }
                     }
 
