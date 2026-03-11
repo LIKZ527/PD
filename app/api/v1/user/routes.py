@@ -821,3 +821,301 @@ def list_permission_definitions(current_user: dict = Depends(get_current_user)):
                 "data": rows,
                 "total": len(rows)
             }
+    
+# ========== 库房管理接口 ==========
+
+class WarehouseCreateReq(BaseModel):
+    warehouse_name: str = Field(..., description="库房名称")
+    public_account: Optional[str] = Field(None, description="对公账号")
+
+class WarehouseUpdateReq(BaseModel):
+    warehouse_name: Optional[str] = Field(None, description="库房名称")
+    public_account: Optional[str] = Field(None, description="对公账号")
+    is_active: Optional[int] = Field(None, description="是否启用：1=启用，0=停用")
+
+@router.post("/warehouses", summary="创建库房")
+def create_warehouse(
+    body: WarehouseCreateReq,
+    current_user: dict = Depends(get_current_user)
+):
+    """创建新库房"""
+    check_manager_permission(current_user)
+    
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # 检查名称是否已存在
+            cur.execute("SELECT 1 FROM pd_warehouses WHERE warehouse_name=%s", (body.warehouse_name,))
+            if cur.fetchone():
+                raise HTTPException(status_code=400, detail="库房名称已存在")
+            
+            cur.execute("""
+                INSERT INTO pd_warehouses (warehouse_name, public_account) 
+                VALUES (%s, %s)
+            """, (body.warehouse_name, body.public_account))
+            conn.commit()
+            warehouse_id = cur.lastrowid
+    
+    return {"success": True, "message": "库房创建成功", "warehouse_id": warehouse_id}
+
+@router.get("/warehouses", summary="库房列表")
+def list_warehouses(
+    keyword: Optional[str] = None,
+    is_active: Optional[int] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """获取库房列表"""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            where = ["1=1"]
+            params = []
+            if keyword:
+                where.append("warehouse_name LIKE %s")
+                params.append(f"%{keyword}%")
+            if is_active is not None:
+                where.append("is_active = %s")
+                params.append(is_active)
+            
+            cur.execute(f"""
+                SELECT w.*, COUNT(p.id) as payee_count
+                FROM pd_warehouses w
+                LEFT JOIN pd_payees p ON w.id = p.warehouse_id AND p.is_active = 1
+                WHERE {' AND '.join(where)}
+                GROUP BY w.id
+                ORDER BY w.created_at DESC
+            """, tuple(params))
+            
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+            return {"success": True, "data": [dict(zip(columns, row)) for row in rows]}
+
+@router.get("/warehouses/{warehouse_id}", summary="库房详情")
+def get_warehouse(
+    warehouse_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """获取库房详情（包含收款人列表）"""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM pd_warehouses WHERE id=%s", (warehouse_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="库房不存在")
+            
+            columns = [desc[0] for desc in cur.description]
+            warehouse = dict(zip(columns, row))
+            
+            # 获取该库房的收款人
+            cur.execute("""
+                SELECT id, payee_name, payee_account, payee_bank_name, is_active
+                FROM pd_payees WHERE warehouse_id=%s
+            """, (warehouse_id,))
+            payee_columns = [desc[0] for desc in cur.description]
+            payees = [dict(zip(payee_columns, r)) for r in cur.fetchall()]
+            warehouse['payees'] = payees
+            
+            return {"success": True, "data": warehouse}
+
+@router.put("/warehouses/{warehouse_id}", summary="更新库房")
+def update_warehouse(
+    warehouse_id: int,
+    body: WarehouseUpdateReq,
+    current_user: dict = Depends(get_current_user)
+):
+    """更新库房信息"""
+    check_manager_permission(current_user)
+    
+    updates = []
+    params = []
+    if body.warehouse_name is not None:
+        updates.append("warehouse_name=%s")
+        params.append(body.warehouse_name)
+    if body.public_account is not None:
+        updates.append("public_account=%s")
+        params.append(body.public_account)
+    if body.is_active is not None:
+        updates.append("is_active=%s")
+        params.append(body.is_active)
+    
+    if not updates:
+        return {"success": True, "message": "无更新内容"}
+    
+    params.append(warehouse_id)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                UPDATE pd_warehouses SET {', '.join(updates)} WHERE id=%s
+            """, tuple(params))
+            conn.commit()
+    
+    return {"success": True, "message": "库房更新成功"}
+
+@router.delete("/warehouses/{warehouse_id}", summary="删除库房")
+def delete_warehouse(
+    warehouse_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """删除库房（会级联删除收款人）"""
+    check_admin_permission(current_user)
+    
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM pd_warehouses WHERE id=%s", (warehouse_id,))
+            conn.commit()
+    
+    return {"success": True, "message": "库房删除成功"}
+
+
+# ========== 收款人管理接口 ==========
+
+class PayeeCreateReq(BaseModel):
+    warehouse_id: int = Field(..., description="所属库房ID")
+    payee_name: str = Field(..., description="收款人姓名")
+    payee_account: str = Field(..., description="收款账号")
+    payee_bank_name: Optional[str] = Field(None, description="收款银行名称")
+
+class PayeeUpdateReq(BaseModel):
+    warehouse_id: Optional[int] = Field(None, description="所属库房ID")
+    payee_name: Optional[str] = Field(None, description="收款人姓名")
+    payee_account: Optional[str] = Field(None, description="收款账号")
+    payee_bank_name: Optional[str] = Field(None, description="收款银行名称")
+    is_active: Optional[int] = Field(None, description="是否启用：1=启用，0=停用")
+
+@router.post("/payees", summary="创建收款人")
+def create_payee(
+    body: PayeeCreateReq,
+    current_user: dict = Depends(get_current_user)
+):
+    """创建新收款人"""
+    check_manager_permission(current_user)
+    
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # 验证库房是否存在
+            cur.execute("SELECT 1 FROM pd_warehouses WHERE id=%s", (body.warehouse_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=400, detail="所属库房不存在")
+            
+            cur.execute("""
+                INSERT INTO pd_payees (warehouse_id, payee_name, payee_account, payee_bank_name) 
+                VALUES (%s, %s, %s, %s)
+            """, (body.warehouse_id, body.payee_name, body.payee_account, body.payee_bank_name))
+            conn.commit()
+            payee_id = cur.lastrowid
+    
+    return {"success": True, "message": "收款人创建成功", "payee_id": payee_id}
+
+@router.get("/payees", summary="收款人列表")
+def list_payees(
+    warehouse_id: Optional[int] = None,
+    keyword: Optional[str] = None,
+    is_active: Optional[int] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """获取收款人列表"""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            where = ["1=1"]
+            params = []
+            if warehouse_id:
+                where.append("p.warehouse_id = %s")
+                params.append(warehouse_id)
+            if keyword:
+                where.append("(p.payee_name LIKE %s OR p.payee_account LIKE %s)")
+                params.extend([f"%{keyword}%", f"%{keyword}%"])
+            if is_active is not None:
+                where.append("p.is_active = %s")
+                params.append(is_active)
+            
+            cur.execute(f"""
+                SELECT p.*, w.warehouse_name
+                FROM pd_payees p
+                JOIN pd_warehouses w ON p.warehouse_id = w.id
+                WHERE {' AND '.join(where)}
+                ORDER BY w.warehouse_name, p.payee_name
+            """, tuple(params))
+            
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+            return {"success": True, "data": [dict(zip(columns, row)) for row in rows]}
+
+@router.get("/payees/{payee_id}", summary="收款人详情")
+def get_payee(
+    payee_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """获取收款人详情"""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT p.*, w.warehouse_name 
+                FROM pd_payees p
+                JOIN pd_warehouses w ON p.warehouse_id = w.id
+                WHERE p.id=%s
+            """, (payee_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="收款人不存在")
+            
+            columns = [desc[0] for desc in cur.description]
+            return {"success": True, "data": dict(zip(columns, row))}
+
+@router.put("/payees/{payee_id}", summary="更新收款人")
+def update_payee(
+    payee_id: int,
+    body: PayeeUpdateReq,
+    current_user: dict = Depends(get_current_user)
+):
+    """更新收款人信息"""
+    check_manager_permission(current_user)
+    
+    updates = []
+    params = []
+    if body.warehouse_id is not None:
+        # 验证新库房是否存在
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pd_warehouses WHERE id=%s", (body.warehouse_id,))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=400, detail="所属库房不存在")
+        updates.append("warehouse_id=%s")
+        params.append(body.warehouse_id)
+    if body.payee_name is not None:
+        updates.append("payee_name=%s")
+        params.append(body.payee_name)
+    if body.payee_account is not None:
+        updates.append("payee_account=%s")
+        params.append(body.payee_account)
+    if body.payee_bank_name is not None:
+        updates.append("payee_bank_name=%s")
+        params.append(body.payee_bank_name)
+    if body.is_active is not None:
+        updates.append("is_active=%s")
+        params.append(body.is_active)
+    
+    if not updates:
+        return {"success": True, "message": "无更新内容"}
+    
+    params.append(payee_id)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                UPDATE pd_payees SET {', '.join(updates)} WHERE id=%s
+            """, tuple(params))
+            conn.commit()
+    
+    return {"success": True, "message": "收款人更新成功"}
+
+@router.delete("/payees/{payee_id}", summary="删除收款人")
+def delete_payee(
+    payee_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """删除收款人"""
+    check_manager_permission(current_user)
+    
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM pd_payees WHERE id=%s", (payee_id,))
+            conn.commit()
+    
+    return {"success": True, "message": "收款人删除成功"}

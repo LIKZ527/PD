@@ -402,16 +402,32 @@ class WeighbillService:
     # ========== 核心：上传/修改磅单 ==========
 
     def get_warehouse_payees(self, warehouse_name: str) -> Dict[str, Any]:
-        """查询库房的所有收款人"""
+        """查询库房的收款人列表（新表结构）"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    # 先查询库房ID
                     cur.execute("""
-                        SELECT id, warehouse_name, payee_name, payee_account, payee_bank_name, is_active
-                        FROM pd_warehouse_payees
-                        WHERE warehouse_name = %s
-                        ORDER BY is_active DESC, id ASC
+                        SELECT id FROM pd_warehouses 
+                        WHERE warehouse_name = %s AND is_active = 1
                     """, (warehouse_name,))
+                    warehouse_row = cur.fetchone()
+                    
+                    if not warehouse_row:
+                        return {
+                            "success": False,
+                            "error": f"库房 '{warehouse_name}' 不存在或已停用"
+                        }
+                    
+                    warehouse_id = warehouse_row['id']
+                    
+                    # 查询该库房下的收款人
+                    cur.execute("""
+                        SELECT id, payee_name, payee_account, payee_bank_name, is_active
+                        FROM pd_payees
+                        WHERE warehouse_id = %s AND is_active = 1
+                        ORDER BY id ASC
+                    """, (warehouse_id,))
                     
                     columns = [desc[0] for desc in cur.description]
                     rows = cur.fetchall()
@@ -420,6 +436,7 @@ class WeighbillService:
                     return {
                         "success": True,
                         "count": len(payees),
+                        "warehouse_id": warehouse_id,
                         "payees": payees
                     }
                     
@@ -428,14 +445,15 @@ class WeighbillService:
             return {"success": False, "error": str(e)}
 
     def _get_payee_by_id(self, payee_id: int) -> Optional[Dict]:
-        """根据ID获取收款人详情"""
+        """根据ID获取收款人详情（新表结构）"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
-                        SELECT id, warehouse_name, payee_name, payee_account, payee_bank_name, is_active
-                        FROM pd_warehouse_payees
-                        WHERE id = %s
+                        SELECT p.*, w.warehouse_name
+                        FROM pd_payees p
+                        JOIN pd_warehouses w ON p.warehouse_id = w.id
+                        WHERE p.id = %s
                     """, (payee_id,))
                     row = cur.fetchone()
                     if row:

@@ -14,6 +14,7 @@ from app.core.paths import TEMP_UPLOADS_DIR
 from app.services.weighbill_service import WeighbillService, get_weighbill_service
 from app.services.contract_service import get_conn
 from core.auth import get_current_user
+import services
 
 router = APIRouter(prefix="/weighbills", tags=["磅单管理"])
 logger = logging.getLogger(__name__)
@@ -225,11 +226,51 @@ async def upload_weighbill(
         warehouse_name: Optional[str] = Form(None, description="磅单仓库名称"),
         warehouse: Optional[str] = Form(None, description="送货库房"),
         payee: Optional[str] = Form(None, description="收款人"),
+        payee_id: Optional[int] = Form(None, description="收款人ID"),
         is_manual: bool = Form(False, description="是否人工修正"),
         weighbill_image: UploadFile = File(..., description="磅单图片"),
         service: WeighbillService = Depends(get_weighbill_service),
         current_user: dict = Depends(get_current_user)
 ):
+    # ========== 新增校验：必须指定库房或收款人 ==========
+    final_warehouse = warehouse_name or warehouse
+    final_payee = payee
+    
+    if not final_warehouse and not final_payee and not payee_id:
+        raise HTTPException(
+            status_code=400, 
+            detail="必须指定库房(warehouse_name/warehouse)或收款人(payee/payee_id)至少一项"
+        )
+    
+    # 如果指定了库房，验证库房是否存在
+    if final_warehouse:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id FROM pd_warehouses 
+                    WHERE warehouse_name = %s AND is_active = 1
+                """, (final_warehouse,))
+                if not cur.fetchone():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"库房 '{final_warehouse}' 不存在或已停用"
+                    )
+    
+    # 如果指定了payee_id，验证收款人是否存在
+    if payee_id:
+        payee_info = service._get_payee_by_id(payee_id)
+        if not payee_info:
+            raise HTTPException(
+                status_code=400,
+                detail=f"收款人ID {payee_id} 不存在"
+            )
+        # 如果同时指定了库房，验证收款人是否属于该库房
+        if final_warehouse and payee_info.get('warehouse_name') != final_warehouse:
+            raise HTTPException(
+                status_code=400,
+                detail=f"收款人ID {payee_id} 不属于库房 '{final_warehouse}'"
+            )
+    # ========== 校验结束 ==========
     """上传磅单（按品种上传）"""
     try:
         # 自动获取单价

@@ -119,7 +119,8 @@ TABLE_STATEMENTS = [
 		perm_customer_manage TINYINT DEFAULT 0 COMMENT '客户管理权限',
 		perm_delivery_manage TINYINT DEFAULT 0 COMMENT '报货管理权限',
 		perm_weighbill_manage TINYINT DEFAULT 0 COMMENT '磅单管理权限',
-		perm_warehouse_manage TINYINT DEFAULT 0 COMMENT '库房和收款人信息管理权限',
+		perm_warehouse_manage TINYINT DEFAULT 0 COMMENT '库房管理权限',
+		perm_payee_manage TINYINT DEFAULT 0 COMMENT '收款人管理权限',
 		perm_account_manage TINYINT DEFAULT 0 COMMENT '账号管理权限',
 		perm_role_manage TINYINT DEFAULT 0 COMMENT '角色管理权限',
 		perm_ai_detect TINYINT DEFAULT 0 COMMENT 'AI检测权限',
@@ -240,20 +241,32 @@ TABLE_STATEMENTS = [
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='角色权限模板表';
 	""",
 	"""
-	CREATE TABLE IF NOT EXISTS pd_warehouse_payees (
+	CREATE TABLE IF NOT EXISTS pd_warehouses (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
-		warehouse_name VARCHAR(64) NOT NULL COMMENT '库房名称',
-		regional_manager VARCHAR(64) COMMENT '大区经理',
+		warehouse_name VARCHAR(64) NOT NULL UNIQUE COMMENT '库房名称',
+		public_account VARCHAR(32) COMMENT '对公账号',
+		is_active TINYINT DEFAULT 1 COMMENT '是否启用：1=启用，0=停用',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+		INDEX idx_warehouse_name (warehouse_name),
+		INDEX idx_is_active (is_active)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='库房表';
+	""",
+	"""
+	CREATE TABLE IF NOT EXISTS pd_payees (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+		warehouse_id BIGINT NOT NULL COMMENT '所属库房ID（关联pd_warehouses.id）',
 		payee_name VARCHAR(64) NOT NULL COMMENT '收款人姓名',
 		payee_account VARCHAR(32) NOT NULL COMMENT '收款账号',
 		payee_bank_name VARCHAR(64) COMMENT '收款银行名称',
 		is_active TINYINT DEFAULT 1 COMMENT '是否启用：1=启用，0=停用',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-		INDEX idx_warehouse_name (warehouse_name),
+		INDEX idx_warehouse_id (warehouse_id),
 		INDEX idx_payee_name (payee_name),
-		INDEX idx_is_active (is_active)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='库房与收款人配置表';
+		INDEX idx_is_active (is_active),
+		FOREIGN KEY (warehouse_id) REFERENCES pd_warehouses(id) ON DELETE CASCADE
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='收款人表';
 	""",
 	# ========== 新增合同管理表 ==========
 	"""
@@ -470,7 +483,8 @@ def init_permission_definitions():
 				('perm_customer_manage', '客户管理'),
 				('perm_delivery_manage', '报货管理'),
 				('perm_weighbill_manage', '磅单管理'),
-				('perm_warehouse_manage', '库房和收款人信息管理'),
+				('perm_warehouse_manage', '库房管理'),      # 新增
+				('perm_payee_manage', '收款人管理'),        # 新增
 				('perm_account_manage', '账号管理'),
 				('perm_role_manage', '角色管理'),
 				('perm_ai_detect', 'AI检测'),

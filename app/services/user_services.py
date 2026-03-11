@@ -540,13 +540,15 @@ class PermissionService:
                         'perm_customer_manage': 1,
                         'perm_delivery_manage': 1,
                         'perm_weighbill_manage': 1,
-                        'perm_warehouse_manage': 1,
+                        'perm_warehouse_manage': 1,      # 新增
+                        'perm_payee_manage': 1,          # 新增
                         'perm_account_manage': 1,
+                        'perm_role_manage': 1,
                     },
                     '自营库管理': {
                         'perm_delivery_manage': 1,
                         'perm_weighbill_manage': 1,
-                        'perm_warehouse_manage': 1,
+                        'perm_warehouse_manage': 1,      # 新增：自营库管理可以管理库房
                     },
                     '财务': {
                         'perm_jinli_payment': 1,
@@ -555,6 +557,7 @@ class PermissionService:
                         'perm_payout': 1,
                         'perm_payout_stats': 1,
                         'perm_report_stats': 1,
+                        'perm_payee_manage': 1,          # 新增：财务可以管理收款人
                     },
                     '会计': {
                         'perm_jinli_payment': 1,
