@@ -1411,6 +1411,11 @@ class BalanceService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    payee_expr = (
+                        "COALESCE(NULLIF(TRIM(b.payee_name), ''), "
+                        "NULLIF(TRIM(b.driver_name), ''), "
+                        "CONCAT('未匹配收款人#', b.id))"
+                    )
                     schedule_date_expr = "COALESCE(b.schedule_date, w.payment_schedule_date)"
 
                     # 构建WHERE条件（在分组前过滤）
@@ -1419,12 +1424,12 @@ class BalanceService:
 
                     # 精确收款人姓名
                     if payee_name:
-                        where_clauses.append("driver_name = %s")
+                        where_clauses.append(f"{payee_expr} = %s")
                         params.append(payee_name)
 
                     # 精确司机电话
                     if driver_phone:
-                        where_clauses.append("driver_phone = %s")
+                        where_clauses.append("b.driver_phone = %s")
                         params.append(driver_phone)
 
                     if payment_schedule_date:
@@ -1433,15 +1438,15 @@ class BalanceService:
 
                     # 支付状态筛选
                     if payment_status is not None:
-                        where_clauses.append("payment_status = %s")
+                        where_clauses.append("b.payment_status = %s")
                         params.append(payment_status)
                     else:
                         # 默认只显示待支付和部分支付的（有结余的）
-                        where_clauses.append("payment_status IN (0, 1)")
+                        where_clauses.append("b.payment_status IN (0, 1)")
 
                     # 最小结余金额
                     if min_balance is not None:
-                        where_clauses.append("balance_amount >= %s")
+                        where_clauses.append("b.balance_amount >= %s")
                         params.append(min_balance)
 
                     # 模糊搜索（收款人姓名、电话、车牌号）
@@ -1451,7 +1456,7 @@ class BalanceService:
                         for token in tokens:
                             like = f"%{token}%"
                             or_clauses.append(
-                                "(driver_name LIKE %s OR driver_phone LIKE %s OR vehicle_no LIKE %s OR contract_no LIKE %s)"
+                                f"({payee_expr} LIKE %s OR b.driver_phone LIKE %s OR b.vehicle_no LIKE %s OR b.contract_no LIKE %s)"
                             )
                             params.extend([like, like, like, like])
                         if or_clauses:
@@ -1462,11 +1467,11 @@ class BalanceService:
                     # 查询总数（分组后的记录数）
                     count_sql = f"""
                         SELECT COUNT(*) FROM (
-                            SELECT driver_name, driver_phone
+                            SELECT {payee_expr} as payee_name, b.driver_phone
                             FROM pd_balance_details b
                             LEFT JOIN pd_weighbills w ON w.id = b.weighbill_id
                             WHERE {where_sql}
-                            GROUP BY driver_name, driver_phone
+                            GROUP BY {payee_expr}, b.driver_phone
                         ) t
                     """
                     cur.execute(count_sql, tuple(params))
@@ -1476,23 +1481,23 @@ class BalanceService:
                     offset = (page - 1) * page_size
                     query_sql = f"""
                         SELECT 
-                            driver_name as payee_name,
-                            driver_phone,
+                            {payee_expr} as payee_name,
+                            b.driver_phone,
                             MAX({schedule_date_expr}) as payment_schedule_date,
                             COUNT(*) as bill_count,
-                            SUM(payable_amount) as total_payable,
-                            SUM(paid_amount) as total_paid,
-                            SUM(balance_amount) as total_balance,
-                            GROUP_CONCAT(DISTINCT contract_no ORDER BY contract_no SEPARATOR ', ') as related_contracts,
-                            GROUP_CONCAT(DISTINCT vehicle_no ORDER BY vehicle_no SEPARATOR ', ') as related_vehicles,
-                            MIN(created_at) as first_bill_date,
-                            MAX(created_at) as last_bill_date,
-                            SUM(CASE WHEN payment_status = 0 THEN 1 ELSE 0 END) as pending_count,
-                            SUM(CASE WHEN payment_status = 1 THEN 1 ELSE 0 END) as partial_count
+                            SUM(b.payable_amount) as total_payable,
+                            SUM(b.paid_amount) as total_paid,
+                            SUM(b.balance_amount) as total_balance,
+                            GROUP_CONCAT(DISTINCT b.contract_no ORDER BY b.contract_no SEPARATOR ', ') as related_contracts,
+                            GROUP_CONCAT(DISTINCT b.vehicle_no ORDER BY b.vehicle_no SEPARATOR ', ') as related_vehicles,
+                            MIN(b.created_at) as first_bill_date,
+                            MAX(b.created_at) as last_bill_date,
+                            SUM(CASE WHEN b.payment_status = 0 THEN 1 ELSE 0 END) as pending_count,
+                            SUM(CASE WHEN b.payment_status = 1 THEN 1 ELSE 0 END) as partial_count
                         FROM pd_balance_details b
                         LEFT JOIN pd_weighbills w ON w.id = b.weighbill_id
                         WHERE {where_sql}
-                        GROUP BY driver_name, driver_phone
+                        GROUP BY {payee_expr}, b.driver_phone
                         ORDER BY total_balance DESC, last_bill_date DESC
                         LIMIT %s OFFSET %s
                     """
