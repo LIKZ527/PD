@@ -624,10 +624,22 @@ async def get_payment_receipt_image(
     if not mime_type:
         mime_type = "image/jpeg"
 
+    # 对中文文件名进行 RFC 5987/RFC 6266 编码，避免 latin-1 编码错误
+    from urllib.parse import quote
+    filename = full_path.name
+    # ASCII 字符直接用，非 ASCII 字符用 RFC 5987 编码
+    try:
+        filename.encode('ascii')
+        disposition = f'inline; filename="{filename}"'
+    except UnicodeEncodeError:
+        # 包含中文，使用 RFC 5987 编码
+        encoded_filename = quote(filename, safe='')
+        disposition = f"inline; filename*=UTF-8''{encoded_filename}"
+
     return FileResponse(
         path=str(full_path),
         media_type=mime_type,
-        headers={"Content-Disposition": f'inline; filename="{full_path.name}"'}
+        headers={"Content-Disposition": disposition}
     )
 
 @router.get("/payment-receipts/{receipt_id}", summary="查看支付回单详情")
