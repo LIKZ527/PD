@@ -432,7 +432,6 @@ TABLE_STATEMENTS = [
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='权限字段定义表';
 	""",
 	"""
-	-- 存储Excel导入的原始数据
 	CREATE TABLE IF NOT EXISTS pd_payment_excel_imports (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
 		payment_detail_id BIGINT COMMENT '关联的收款明细ID',

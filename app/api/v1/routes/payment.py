@@ -23,7 +23,9 @@ from core.auth import get_current_user
 from app.services.payment_services import (
     PaymentService,
     PaymentStage,
-    calculate_payment_amount
+    calculate_payment_amount,
+    WEIGHBILL_NO_PATTERNS,  # 从 services 导入
+    AMOUNT_PATTERNS,       # 从 services 导入
 )
 
 logger = get_logger(__name__)
@@ -35,17 +37,6 @@ PAYMENT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # 允许的文件扩展名
 ALLOWED_EXTENSIONS = {'.xlsx', '.xls'}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-
-WEIGHBILL_NO_PATTERNS = [
-    '过磅单号', '磅单号', 'weigh_ticket_no', '磅单编号', 
-    '过磅编号', 'weighbill_no', '磅单'
-]
-
-AMOUNT_PATTERNS = {
-    'yuguang': ['含税金额', '金额', '总价', 'total_amount', '含税总价'],
-    'jinli': ['结算金额', '金额', '总价', 'total_amount', '结算总价']
-}
-
 # ========== Pydantic 模型定义 ==========
 
 class PaymentStageEnum(IntEnum):

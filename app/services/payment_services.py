@@ -12,6 +12,18 @@ from core.logging import get_logger
 
 logger = get_logger(__name__)
 
+# ========== 常量定义（避免循环导入） ==========
+
+WEIGHBILL_NO_PATTERNS = [
+    '过磅单号', '磅单号', 'weigh_ticket_no', '磅单编号', 
+    '过磅编号', 'weighbill_no', '磅单'
+]
+
+AMOUNT_PATTERNS = {
+    'yuguang': ['含税金额', '金额', '总价', 'total_amount', '含税总价'],
+    'jinli': ['结算金额', '金额', '总价', 'total_amount', '结算总价']
+}
+
 
 # ========== 枚举定义 ==========
 
