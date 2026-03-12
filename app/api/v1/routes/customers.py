@@ -34,7 +34,8 @@ class CustomerUpdateRequest(BaseModel):
 
 class WarehousePayeeCreateRequest(BaseModel):
     """库房收款员新增请求"""
-
+    
+    warehouse_id: Optional[int] = Field(None, description="库房ID，可选")
     warehouse_name: Optional[str] = Field(None, description="库房名称", max_length=100)
     payee_name: str = Field(..., min_length=1, max_length=100)
     payee_account: Optional[str] = Field(None, max_length=100)
