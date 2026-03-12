@@ -12,19 +12,33 @@ class CustomerService:
     """客户服务"""
 
     def create_warehouse_payee(self, data: Dict) -> Dict[str, Any]:
-        """新增库房收款员信息（warehouse_name 改为可选，不强制填写）"""
+        """新增库房收款员信息"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # warehouse_name 从请求数据中获取，不传则默认为空字符串
+                    # 获取库房名称（优先使用传入的，或通过ID查询）
+                    warehouse_id = data.get("warehouse_id")
+                    warehouse_name = data.get("warehouse_name", "")
+                    
+                    # 如果传了 warehouse_id，查询对应的库房名称
+                    if warehouse_id:
+                        cur.execute(
+                            "SELECT warehouse_name FROM pd_warehouses WHERE id = %s",
+                            (warehouse_id,)
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            warehouse_name = row[0]
+                    
                     cur.execute(
                         """
                         INSERT INTO pd_warehouse_payees
-                        (warehouse_name, payee_name, payee_account, payee_bank_name, is_active)
-                        VALUES (%s, %s, %s, %s, %s)
+                        (warehouse_id, warehouse_name, payee_name, payee_account, payee_bank_name, is_active)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         """,
                         (
-                            data.get("warehouse_name", ""),  # 从请求获取，默认为空
+                            warehouse_id,  # 可能为 None
+                            warehouse_name,  # 可能为空字符串
                             data.get("payee_name"),
                             data.get("payee_account"),
                             data.get("payee_bank_name"),
