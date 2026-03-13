@@ -524,15 +524,19 @@ async def modify_weighbill(
 
 @router.get("/", summary="查询磅单列表", response_model=dict)
 async def list_weighbills(
-    exact_delivery_id: Optional[int] = Query(None, description="精确报单ID"),
-    exact_weighbill_id: Optional[int] = Query(None, description="精确磅单ID"),
-    exact_shipper: Optional[str] = Query(None, description="精确发货人/报单人"),
-    exact_contract_no: Optional[str] = Query(None, description="精确合同编号"),
-    exact_report_date: Optional[str] = Query(None, description="精确报单日期"),
-    exact_driver_name: Optional[str] = Query(None, description="精确司机姓名"),
-    exact_vehicle_no: Optional[str] = Query(None, description="精确车号"),
-    exact_weigh_date: Optional[str] = Query(None, description="精确磅单日期"),
-    exact_ocr_status: Optional[str] = Query(None, description="精确磅单状态：待上传磅单/已确认"),
+        exact_delivery_id: Optional[int] = Query(None, description="精确报单ID"),
+        exact_weighbill_id: Optional[int] = Query(None, description="精确磅单ID"),
+        exact_shipper: Optional[str] = Query(None, description="精确发货人/报单人"),
+        exact_contract_no: Optional[str] = Query(None, description="精确合同编号"),
+        exact_report_date: Optional[str] = Query(None, description="精确报单日期"),
+        exact_driver_name: Optional[str] = Query(None, description="精确司机姓名"),
+        exact_vehicle_no: Optional[str] = Query(None, description="精确车号"),
+        exact_weigh_date: Optional[str] = Query(None, description="精确磅单日期"),
+        exact_ocr_status: Optional[str] = Query(None, description="精确磅单状态：待上传磅单/已确认"),
+        # === 新增 ===
+        exact_schedule_status: Optional[int] = Query(None, description="排款状态：0=待排期, 1=已排期"),
+        exact_payout_status: Optional[int] = Query(None, description="打款状态：0=待打款, 1=已打款"),
+        exact_collection_status: Optional[int] = Query(None, description="回款状态：0=待回款, 1=已回首笔, 2=已回款"),
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=100),
         service: WeighbillService = Depends(get_weighbill_service)
@@ -540,19 +544,10 @@ async def list_weighbills(
     """
     查询磅单列表（按报单ID分组）
 
-    表头：合同编号、报单日期、报送冶炼厂、司机电话、司机姓名、司机身份证号、
-          车牌号、品种、是否自带联单、是否上传联单、报单人/发货人、收款人、送货库房、
-          磅单日期、过磅单号、毛重、皮重、净重、单价、金额、磅单状态、磅单图片、
-          人工修正、送货时间、操作
-
-
-    新增：
-
-        payable_amount_calculated --应付金额
-
-        receivable_amount_calculated --回款金额
-
-        payable_unit_price --应付单价=合同单价/1.048
+    新增筛选参数：
+    - exact_schedule_status : 排款状态（0待排期/1已排期）
+    - exact_payout_status    : 打款状态（0待打款/1已打款）
+    - exact_collection_status: 回款状态（0待回款/1已回首笔/2已回款）
     """
     try:
         return service.list_weighbills_grouped(
@@ -565,10 +560,12 @@ async def list_weighbills(
             exact_vehicle_no=exact_vehicle_no,
             exact_weigh_date=exact_weigh_date,
             exact_ocr_status=exact_ocr_status,
+            exact_schedule_status=exact_schedule_status,
+            exact_payout_status=exact_payout_status,
+            exact_collection_status=exact_collection_status,
             page=page,
             page_size=page_size,
         )
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

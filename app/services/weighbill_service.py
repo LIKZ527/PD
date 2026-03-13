@@ -1086,6 +1086,9 @@ class WeighbillService:
             exact_ocr_status: str = None,
             exact_delivery_id: int = None,
             exact_weighbill_id: int = None,
+            exact_schedule_status: int = None,  # 新增：排款状态 0=待排期,1=已排期
+            exact_payout_status: int = None,  # 新增：打款状态 0=待打款,1=已打款
+            exact_collection_status: int = None,  # 新增：回款状态 0=待回款,1=已回首笔,2=已回款
             page: int = 1,
             page_size: int = 20
     ) -> Dict[str, Any]:
@@ -1170,6 +1173,17 @@ class WeighbillService:
                     if exact_weighbill_id is not None:
                         weighbill_where.append("w.id = %s")
                         weighbill_params.append(exact_weighbill_id)
+
+                    # === 新增状态筛选 ===
+                    if exact_schedule_status is not None:
+                        weighbill_where.append("b.schedule_status = %s")
+                        weighbill_params.append(exact_schedule_status)
+                    if exact_payout_status is not None:
+                        weighbill_where.append("b.payout_status = %s")
+                        weighbill_params.append(exact_payout_status)
+                    if exact_collection_status is not None:
+                        weighbill_where.append("pd.collection_status = %s")
+                        weighbill_params.append(exact_collection_status)
 
                     weighbill_sql = " AND ".join(weighbill_where)
 
