@@ -85,7 +85,7 @@ class DeliveryOut(BaseModel):
     uploaded_at: Optional[str] = None
     created_at: Optional[str] = None
     operations: Optional[dict] = None
-
+    voucher_images: Optional[List[str]] = None
 
 class BatchDeliveryOrderItem(BaseModel):
     """单个联单上传项（内部使用）"""
@@ -152,34 +152,35 @@ class TextExtractResponse(BaseModel):
 
 @router.post("/", summary="新增报货订单", response_model=dict)
 async def create_delivery(
-        report_date: str = Form(...),
-        target_factory_id: Optional[int] = Form(None),
-        target_factory_name: str = Form(...),
-        product_name: str = Form(..., description="主品种，随便填"),
-        products: Optional[str] = Form(None, description="品种列表，逗号分隔，最多4个，用于计算品种数量"),
-        quantity: float = Form(...),
-        vehicle_no: str = Form(...),
-        driver_name: str = Form(...),
-        driver_phone: str = Form(...),
-        driver_id_card: Optional[str] = Form(None),
-        has_delivery_order: str = Form("无"),
-        status: str = Form("待确认"),
-        uploaded_by: Optional[str] = Form(None),
-        reporter_id: Optional[int] = Form(None, description="报单人ID"),  # 新增
-        reporter_name: Optional[str] = Form(None, description="报单人姓名"),  # 新增
-        confirm_flag: bool = Form(False, description="二次确认标志"),
-        delivery_order_image: Optional[UploadFile] = File(None),
-        service: DeliveryService = Depends(get_delivery_service),
-        current_user: dict = Depends(get_current_user)
+    report_date: str = Form(...),
+    target_factory_id: Optional[int] = Form(None),
+    target_factory_name: str = Form(...),
+    product_name: str = Form(..., description="主品种，随便填"),
+    products: Optional[str] = Form(None, description="品种列表，逗号分隔，最多4个，用于计算品种数量"),
+    quantity: float = Form(...),
+    vehicle_no: str = Form(...),
+    driver_name: str = Form(...),
+    driver_phone: str = Form(...),
+    driver_id_card: Optional[str] = Form(None),
+    has_delivery_order: str = Form("无"),
+    status: str = Form("待确认"),
+    uploaded_by: Optional[str] = Form(None),
+    reporter_id: Optional[int] = Form(None, description="报单人ID"),
+    reporter_name: Optional[str] = Form(None, description="报单人姓名"),
+    confirm_flag: bool = Form(False, description="二次确认标志"),
+    delivery_order_image: Optional[UploadFile] = File(None, description="有联单时上传的联单图片"),
+    voucher_images: List[UploadFile] = File(None, description="无联单时上传的凭证图片（最多6张）"),
+    service: DeliveryService = Depends(get_delivery_service),
+    current_user: dict = Depends(get_current_user)
 ):
-    """创建报货订单（支持上传联单图片）"""
+    """创建报货订单（支持联单图片或凭证图片）"""
     try:
         data = {
             "report_date": report_date,
             "target_factory_id": target_factory_id,
             "target_factory_name": target_factory_name,
             "product_name": product_name,
-            "products": products,  # ← 添加这行！
+            "products": products,
             "quantity": quantity,
             "vehicle_no": vehicle_no,
             "driver_name": driver_name,
@@ -192,11 +193,24 @@ async def create_delivery(
             "reporter_name": reporter_name,
         }
 
-        image_bytes = None
+        # 读取联单图片
+        delivery_img_bytes = None
         if delivery_order_image:
-            image_bytes = await delivery_order_image.read()
+            delivery_img_bytes = await delivery_order_image.read()
 
-        result = service.create_delivery(data, image_bytes, current_user, confirm_flag)
+        # 读取多张凭证图片
+        voucher_bytes_list = []
+        if voucher_images:
+            for f in voucher_images:
+                voucher_bytes_list.append(await f.read())
+
+        result = service.create_delivery(
+            data,
+            delivery_order_image=delivery_img_bytes,
+            voucher_images=voucher_bytes_list,
+            current_user=current_user,
+            confirm_flag=confirm_flag
+        )
 
         if result.get("need_confirm"):
             raise HTTPException(
@@ -217,7 +231,6 @@ async def create_delivery(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ============ JSON 专用接口 ============
 
@@ -240,6 +253,72 @@ class DeliveryCreateJsonRequest(BaseModel):
     reporter_name: Optional[str] = Field(None, description="报单人姓名")
     confirm_flag: bool = Field(False, description="二次确认标志")
 
+@router.post("/{delivery_id}/vouchers/append", summary="追加凭证图片")
+async def append_voucher_images(
+    delivery_id: int,
+    images: List[UploadFile] = File(..., description="要追加的凭证图片，最多不超过总张数6"),
+    service: DeliveryService = Depends(get_delivery_service)
+):
+    """追加凭证图片（不会删除原有图片）"""
+    try:
+        img_bytes_list = [await f.read() for f in images]
+        result = service.add_voucher_images(delivery_id, img_bytes_list)
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(status_code=400, detail=result.get("error"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/{delivery_id}/vouchers/{index}", summary="删除指定凭证图片")
+async def delete_voucher_image(
+    delivery_id: int,
+    index: int,
+    service: DeliveryService = Depends(get_delivery_service)
+):
+    """按索引删除凭证图片（0-based）"""
+    result = service.remove_voucher_image(delivery_id, index)
+    if result["success"]:
+        return result
+    else:
+        raise HTTPException(status_code=400, detail=result.get("error"))
+
+@router.get("/{delivery_id}/vouchers", summary="获取凭证图片列表")
+async def list_voucher_images(
+    delivery_id: int,
+    service: DeliveryService = Depends(get_delivery_service)
+):
+    """返回凭证图片路径列表"""
+    paths = service.get_voucher_images(delivery_id)
+    return {"voucher_images": paths}
+
+@router.put("/{delivery_id}/vouchers", summary="整体替换凭证图片")
+async def replace_voucher_images(
+    delivery_id: int,
+    voucher_images: List[UploadFile] = File(..., description="新的凭证图片列表，最多6张"),
+    service: DeliveryService = Depends(get_delivery_service),
+    current_user: dict = Depends(get_current_user)
+):
+    """整体替换凭证图片（会删除原有所有凭证图片）"""
+    try:
+        voucher_bytes_list = [await f.read() for f in voucher_images]
+        result = service.update_delivery(
+            delivery_id,
+            data={},
+            delivery_order_image=None,
+            voucher_images=voucher_bytes_list,
+            uploaded_by=current_user.get('name') if current_user else None
+        )
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(status_code=400, detail=result.get("error"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/json", summary="JSON 新增报货订单", response_model=dict)
 async def create_delivery_json(

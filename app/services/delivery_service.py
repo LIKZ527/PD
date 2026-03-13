@@ -2,6 +2,7 @@
 销售台账/报货订单服务 - 完整版
 支持合同品种匹配 + 车数校验（向后匹配）
 """
+import json
 import logging
 import os
 import re
@@ -537,23 +538,44 @@ class DeliveryService:
 
         return products
 
-    def create_delivery(self, data: Dict, image_file: bytes = None,
-                        current_user: dict = None, confirm_flag: bool = False) -> Dict[str, Any]:
-        """创建报货订单（支持合同品种匹配+车数校验+向后匹配）"""
-        image_path = None
-        temp_file_path = None
+    def _save_delivery_image(self, image_bytes: bytes, vehicle_no: str) -> str:
+        """保存单张联单图片，返回路径"""
+        safe_name = re.sub(r'[^\w\-]', '_', str(vehicle_no or 'unknown'))
+        filename = f"delivery_{safe_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}.jpg"
+        file_path = UPLOAD_DIR / filename
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, "wb") as f:
+            f.write(image_bytes)
+        return str(file_path)
 
+    def _save_voucher_image(self, image_bytes: bytes, vehicle_no: str, index: int) -> str:
+        """保存单张凭证图片，返回路径"""
+        safe_name = re.sub(r'[^\w\-]', '_', str(vehicle_no or 'unknown'))
+        filename = f"voucher_{safe_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{index}_{uuid.uuid4().hex[:4]}.jpg"
+        # 存放在 UPLOAD_DIR/vouchers/ 子目录下
+        file_path = UPLOAD_DIR / 'vouchers' / filename
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, "wb") as f:
+            f.write(image_bytes)
+        return str(file_path)
+
+    def create_delivery(
+            self,
+            data: Dict,
+            delivery_order_image: bytes = None,  # 联单图片（有联单时）
+            voucher_images: List[bytes] = None,  # 凭证图片列表（无联单时，最多6张）
+            current_user: dict = None,
+            confirm_flag: bool = False
+    ) -> Dict[str, Any]:
+        """创建报货订单（支持有联单图片或无联单多张凭证图片）"""
+        temp_files = []  # 记录所有临时文件，用于异常时清理
         try:
-            driver_phone = data.get('driver_phone') if data else None
-            driver_id_card = self._normalize_driver_id_card(data.get('driver_id_card')) if data else None
-
-            # 参数防御性检查
-            if data is None:
-                return {"success": False, "error": "请求数据不能为空"}
-
-            data['driver_id_card'] = driver_id_card
+            # ---------- 参数校验 ----------
+            driver_phone = data.get('driver_phone')
+            driver_id_card = self._normalize_driver_id_card(data.get('driver_id_card'))
             if driver_id_card and len(driver_id_card) > 18:
                 return {"success": False, "error": "司机身份证号长度不能超过18位"}
+            data['driver_id_card'] = driver_id_card
 
             logger.info(f"【DEBUG】create_delivery 开始，data={data}, current_user={current_user}")
 
@@ -562,46 +584,63 @@ class DeliveryService:
             if has_order not in ('有', '无'):
                 return {"success": False, "error": "has_delivery_order 仅支持：有/无（或 是/否）"}
             data['has_delivery_order'] = has_order
+
+            # ---------- 新增：图片互斥校验 ----------
+            if has_order == '有':
+                if voucher_images:
+                    return {"success": False, "error": "有联单时不能上传凭证图片"}
+                # 联单图片处理
+                if delivery_order_image:
+                    image_path = self._save_delivery_image(delivery_order_image, data.get('vehicle_no'))
+                    temp_files.append(image_path)
+                    data['delivery_order_image'] = image_path
+                    data['upload_status'] = '已上传'
+                else:
+                    data['delivery_order_image'] = None
+                    data['upload_status'] = '待上传'
+                # 清空凭证图片字段
+                data['voucher_images'] = None
+            else:  # 无联单
+                if delivery_order_image:
+                    return {"success": False, "error": "无联单时不能上传联单图片，请使用凭证图片"}
+                if voucher_images and len(voucher_images) > 6:
+                    return {"success": False, "error": "凭证图片最多6张"}
+                # 保存多张凭证图片
+                voucher_paths = []
+                if voucher_images:
+                    for idx, img_bytes in enumerate(voucher_images):
+                        path = self._save_voucher_image(img_bytes, data.get('vehicle_no'), idx)
+                        temp_files.append(path)
+                        voucher_paths.append(path)
+                data['voucher_images'] = voucher_paths if voucher_paths else None
+                # 联单图片字段置空
+                data['delivery_order_image'] = None
+                # 对于无联单，凭证已上传即认为 upload_status 为已上传
+                data['upload_status'] = '已上传' if voucher_paths else '待上传'
+
+            # ---------- 原有逻辑：处理操作人信息、计算联单费等 ----------
             uploaded_by = data.get('uploaded_by')
             source_type = self._determine_source_type(has_order, uploaded_by)
             data['source_type'] = source_type
-            logger.info(f"【DEBUG】source_type={source_type}")
 
-            # 处理操作人信息
             uploader_id = None
             uploader_name = "system"
             if current_user:
                 uploader_id = current_user.get("id")
                 uploader_name = current_user.get("name") or current_user.get("account") or "system"
-            logger.info(f"【DEBUG】uploader_id={uploader_id}, uploader_name={uploader_name}")
 
-            # 处理报单人信息
             reporter_id = data.get('reporter_id') or uploader_id
             reporter_name = data.get('reporter_name') or data.get('shipper') or uploader_name
-
             if not data.get('shipper'):
                 data['shipper'] = reporter_name
 
-            # 计算联单费
             service_fee = self._calculate_service_fee(has_order)
-            logger.info(f"【DEBUG】service_fee={service_fee}")
+            data['service_fee'] = service_fee
 
             # 24小时重复校验
             if not confirm_flag:
-                driver_phone = data.get('driver_phone')
-                driver_id_card = self._normalize_driver_id_card(data.get('driver_id_card'))
-                data['driver_id_card'] = driver_id_card
-
-                logger.info(f"【DEBUG】检查重复，driver_phone={driver_phone}, driver_id_card={driver_id_card}")
-
                 if driver_phone or driver_id_card:
                     duplicate_check = self.check_duplicate_in_24h(driver_phone, driver_id_card)
-
-                    if duplicate_check is None:
-                        duplicate_check = {"is_duplicate": False, "existing_orders": [], "duplicate_count": 0}
-
-                    logger.info(f"【DEBUG】duplicate_check={duplicate_check}")
-
                     if duplicate_check.get("is_duplicate"):
                         return {
                             "success": False,
@@ -612,27 +651,23 @@ class DeliveryService:
 
             # 处理品种列表
             products = self._parse_products(data.get('products'), data.get('product_name'))
-            logger.info(f"【DEBUG】处理后 products={products}")
-
             if not products:
                 return {"success": False, "error": "货物品种不能为空"}
-
-            # 获取关键参数
-            target_factory = data.get('target_factory_name')
-            quantity = Decimal(str(data.get('quantity', 0)))
+            data['products'] = products
 
             # 计算本单总车数
+            quantity = Decimal(str(data.get('quantity', 0)))
             planned_trucks = self._calculate_trucks(quantity)
-            logger.info(f"【DEBUG】quantity={quantity}, planned_trucks={planned_trucks}")
+            data['planned_trucks'] = planned_trucks
 
-            # 核心：品种匹配 + 车数校验（向后匹配）
+            # 合同匹配
+            target_factory = data.get('target_factory_name')
             match_result = self._match_contract_with_truck_check(
                 factory_name=target_factory,
                 product_name=products[0],
                 planned_trucks=planned_trucks,
                 report_date=data.get('report_date')
             )
-
             if not match_result['matched']:
                 return {
                     "success": False,
@@ -640,45 +675,19 @@ class DeliveryService:
                     "suggest": match_result.get('suggest', '请拆分报单数量，或创建新车数充足的新合同')
                 }
 
-            # 提取匹配结果
             contract_no = match_result['contract_no']
             unit_price = match_result['unit_price']
             is_last_delivery = match_result['is_last_delivery']
-
-            # 计算总价
             total_amount = float(Decimal(str(unit_price)) * quantity) if (unit_price and quantity) else None
+            data['contract_no'] = contract_no
+            data['contract_unit_price'] = unit_price
+            data['total_amount'] = total_amount
 
-            logger.info(f"【DEBUG】匹配成功: contract_no={contract_no}, "
-                       f"unit_price={unit_price}, is_last_delivery={is_last_delivery}, "
-                       f"skipped={len(match_result.get('skipped_contracts', []))}")
-
-            # 处理联单图片
-            upload_status = '待上传'
-            if image_file and has_order == '有':
-                try:
-                    file_ext = ".jpg"
-                    safe_name = re.sub(r'[^\w\-]', '_', str(data.get('vehicle_no', 'unknown')))
-                    filename = f"order_{safe_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}{file_ext}"
-                    file_path = UPLOAD_DIR / filename
-
-                    temp_file_path = file_path
-                    with open(file_path, "wb") as f:
-                        f.write(image_file)
-                    image_path = str(file_path)
-                    upload_status = '已上传'
-                    logger.info(f"【DEBUG】图片保存成功: {image_path}")
-                except Exception as img_err:
-                    logger.error(f"【DEBUG】保存图片失败: {img_err}")
-                    return {"success": False, "error": f"保存联单图片失败: {img_err}"}
-
-            # 数据库插入
-            logger.info(f"【DEBUG】准备插入数据库...")
-
+            # ---------- 插入数据库 ----------
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     has_products_column = self._delivery_has_products_column()
 
-                    # 构建插入字段
                     insert_fields = [
                         'report_date', 'warehouse', 'target_factory_id', 'target_factory_name',
                         'product_name', 'quantity', 'planned_trucks', 'vehicle_no',
@@ -686,10 +695,8 @@ class DeliveryService:
                         'delivery_order_image', 'upload_status', 'source_type', 'shipper',
                         'payee', 'service_fee', 'contract_no', 'contract_unit_price',
                         'total_amount', 'status', 'uploader_id', 'uploader_name',
-                        'reporter_id', 'reporter_name'
+                        'reporter_id', 'reporter_name', 'voucher_images'  # 新增字段
                     ]
-
-                    # 准备值列表
                     values = [
                         data.get('report_date'),
                         data.get('warehouse'),
@@ -703,8 +710,8 @@ class DeliveryService:
                         driver_phone,
                         driver_id_card,
                         has_order,
-                        image_path,
-                        upload_status,
+                        data.get('delivery_order_image'),
+                        data.get('upload_status'),
                         source_type,
                         data.get('shipper'),
                         data.get('payee'),
@@ -717,30 +724,26 @@ class DeliveryService:
                         uploader_name,
                         reporter_id,
                         reporter_name,
+                        # 将列表转为 JSON 字符串
+                        json.dumps(data.get('voucher_images')) if data.get('voucher_images') else None
                     ]
 
                     if has_products_column:
                         insert_fields.insert(5, 'products')
                         values.insert(5, ','.join(products) if products else None)
 
-                    # 构建 SQL
                     placeholders = ','.join(['%s'] * len(values))
                     fields_str = ','.join(insert_fields)
-
                     sql = f"""
                         INSERT INTO pd_deliveries 
                         ({fields_str}, uploaded_at)
                         VALUES ({placeholders}, NOW())
                     """
-
-                    logger.info(f"【DEBUG】SQL: {sql[:100]}...")
                     cur.execute(sql, tuple(values))
                     delivery_id = cur.lastrowid
-                    logger.info(f"【DEBUG】插入成功, delivery_id={delivery_id}")
 
-                    # 创建磅单记录
+                    # 创建磅单记录（原有逻辑）
                     if products and contract_no:
-                        logger.info(f"【DEBUG】创建磅单记录...")
                         self._create_weighbills(
                             delivery_id=delivery_id,
                             contract_no=contract_no,
@@ -753,206 +756,333 @@ class DeliveryService:
                             uploader_name=uploader_name
                         )
 
-                    temp_file_path = None
+            # 构建返回数据
+            operations = self._build_operations(has_order, data.get('upload_status'), data.get('delivery_order_image'))
 
-                    operations = self._build_operations(has_order, upload_status, image_path)
+            response_data = {
+                "success": True,
+                "message": "报货订单创建成功" + ("（合同最后一单）" if is_last_delivery else ""),
+                "data": {
+                    "id": delivery_id,
+                    "contract_no": contract_no,
+                    "products": products,
+                    "quantity": float(quantity),
+                    "planned_trucks": planned_trucks,
+                    "contract_unit_price": unit_price,
+                    "total_amount": total_amount,
+                    "source_type": source_type,
+                    "upload_status": data.get('upload_status'),
+                    "service_fee": float(service_fee) if service_fee else 0,
+                    "uploader_id": uploader_id,
+                    "uploader_name": uploader_name,
+                    "reporter_id": reporter_id,
+                    "reporter_name": reporter_name,
+                    "is_last_delivery": is_last_delivery,
+                    "voucher_images": data.get('voucher_images'),  # 新增字段
+                    "contract_truck_info": {
+                        "contract_total_trucks": match_result['contract_total_trucks'],
+                        "contract_used_trucks": match_result['contract_used_trucks'],
+                        "contract_remaining_trucks": match_result['contract_remaining_trucks'],
+                        "this_delivery_trucks": match_result['this_delivery_trucks']
+                    },
+                    "operations": operations
+                }
+            }
 
-                    # 构建返回数据
-                    response_data = {
-                        "success": True,
-                        "message": "报货订单创建成功" + ("（合同最后一单）" if is_last_delivery else ""),
-                        "data": {
-                            "id": delivery_id,
-                            "contract_no": contract_no,
-                            "products": products,
-                            "quantity": float(quantity),
-                            "planned_trucks": planned_trucks,
-                            "contract_unit_price": unit_price,
-                            "total_amount": total_amount,
-                            "source_type": source_type,
-                            "upload_status": upload_status,
-                            "service_fee": float(service_fee) if service_fee else 0,
-                            "uploader_id": uploader_id,
-                            "uploader_name": uploader_name,
-                            "reporter_id": reporter_id,
-                            "reporter_name": reporter_name,
-                            "is_last_delivery": is_last_delivery,
-                            "contract_truck_info": {
-                                "contract_total_trucks": match_result['contract_total_trucks'],
-                                "contract_used_trucks": match_result['contract_used_trucks'],
-                                "contract_remaining_trucks": match_result['contract_remaining_trucks'],
-                                "this_delivery_trucks": match_result['this_delivery_trucks']
-                            },
-                            "operations": operations
-                        }
-                    }
+            # 如果有跳过的合同，添加匹配过程信息
+            if match_result.get('skipped_contracts'):
+                response_data["data"]["match_process"] = {
+                    "total_matched_contracts": match_result.get('total_matched', 0),
+                    "matched_index": match_result.get('matched_index', 1),
+                    "skipped_count": len(match_result['skipped_contracts']),
+                    "skipped_contracts": match_result['skipped_contracts']
+                }
+                response_data["message"] += f"（已跳过{len(match_result['skipped_contracts'])}个车数不足的合同）"
 
-                    # 如果有跳过的合同，添加匹配过程信息
-                    if match_result.get('skipped_contracts'):
-                        response_data["data"]["match_process"] = {
-                            "total_matched_contracts": match_result.get('total_matched', 0),
-                            "matched_index": match_result.get('matched_index', 1),
-                            "skipped_count": len(match_result['skipped_contracts']),
-                            "skipped_contracts": match_result['skipped_contracts']
-                        }
-                        response_data["message"] += f"（已跳过{len(match_result['skipped_contracts'])}个车数不足的合同）"
-
-                    return response_data
+            return response_data
 
         except Exception as e:
-            # 清理临时文件
-            if temp_file_path and os.path.exists(temp_file_path):
+            # 异常时清理已保存的临时文件
+            for f in temp_files:
                 try:
-                    os.remove(temp_file_path)
+                    if os.path.exists(f):
+                        os.remove(f)
                 except:
                     pass
             logger.exception(f"【DEBUG】创建报货订单异常: {e}")
             return {"success": False, "error": str(e)}
 
-    def update_delivery(self, delivery_id: int, data: Dict,
-                        image_file: bytes = None, delete_image: bool = False,
-                        uploaded_by: str = None) -> Dict[str, Any]:
-        """更新报货订单"""
-        temp_new_file = None
-        old_image_to_delete = None
+    def update_delivery(
+            self,
+            delivery_id: int,
+            data: Dict,
+            delivery_order_image: bytes = None,
+            voucher_images: List[bytes] = None,
+            delete_image: bool = False,
+            uploaded_by: str = None
+    ) -> Dict[str, Any]:
+        """更新报货订单（支持替换凭证图片列表）"""
+        temp_new_files = []
+        old_images_to_delete = []
 
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    # 查询原记录
                     cur.execute(
-                        "SELECT has_delivery_order, delivery_order_image, upload_status, driver_phone, driver_id_card, planned_trucks, contract_no FROM pd_deliveries WHERE id = %s",
+                        """SELECT has_delivery_order, delivery_order_image, upload_status,
+                                  driver_phone, driver_id_card, planned_trucks, contract_no,
+                                  voucher_images, vehicle_no
+                           FROM pd_deliveries WHERE id = %s""",
                         (delivery_id,)
                     )
                     old = cur.fetchone()
                     if not old:
                         return {"success": False, "error": f"订单ID {delivery_id} 不存在"}
 
-                    if isinstance(old, dict):
-                        old_has_order = old.get('has_delivery_order')
-                        old_image_path = old.get('delivery_order_image')
-                        old_upload_status = old.get('upload_status')
-                        old_driver_phone = old.get('driver_phone')
-                        old_driver_id_card = old.get('driver_id_card')
-                        old_planned_trucks = old.get('planned_trucks')
-                        old_contract_no = old.get('contract_no')
-                    else:
-                        old_has_order, old_image_path, old_upload_status, old_driver_phone, old_driver_id_card, old_planned_trucks, old_contract_no = old
+                    old = dict(old) if isinstance(old, dict) else {
+                        'has_delivery_order': old[0],
+                        'delivery_order_image': old[1],
+                        'upload_status': old[2],
+                        'driver_phone': old[3],
+                        'driver_id_card': old[4],
+                        'planned_trucks': old[5],
+                        'contract_no': old[6],
+                        'voucher_images': old[7],
+                        'vehicle_no': old[8],
+                    }
 
-                    has_order = self._normalize_has_delivery_order(data.get('has_delivery_order', old_has_order))
+                    # 解析原凭证图片列表
+                    old_vouchers = []
+                    if old.get('voucher_images'):
+                        try:
+                            old_vouchers = json.loads(old['voucher_images'])
+                        except:
+                            old_vouchers = []
+
+                    has_order = self._normalize_has_delivery_order(
+                        data.get('has_delivery_order', old['has_delivery_order']))
                     if has_order not in ('有', '无'):
                         return {"success": False, "error": "has_delivery_order 仅支持：有/无（或 是/否）"}
 
-                    if 'driver_id_card' in data:
-                        data['driver_id_card'] = self._normalize_driver_id_card(data.get('driver_id_card'))
-                        if data['driver_id_card'] and len(data['driver_id_card']) > 18:
-                            return {"success": False, "error": "司机身份证号长度不能超过18位"}
+                    # ---------- 互斥校验 ----------
+                    if has_order == '有':
+                        if voucher_images:
+                            return {"success": False, "error": "有联单时不能上传凭证图片"}
+                    else:  # 无联单
+                        if delivery_order_image:
+                            return {"success": False, "error": "无联单时不能上传联单图片，请使用凭证图片"}
 
-                    if 'has_delivery_order' in data:
-                        data['has_delivery_order'] = has_order
-                    if 'has_delivery_order' in data or uploaded_by:
-                        data['uploaded_by'] = uploaded_by
-                        data['source_type'] = self._determine_source_type(has_order, uploaded_by)
+                    # ---------- 处理图片 ----------
+                    new_delivery_image = old['delivery_order_image']
+                    new_upload_status = old['upload_status']
+                    new_vouchers = old_vouchers.copy() if old_vouchers else []
 
-                    if 'has_delivery_order' in data and data['has_delivery_order'] != old_has_order:
-                        data['service_fee'] = self._calculate_service_fee(data['has_delivery_order'])
+                    # 处理联单图片（有联单时）
+                    if has_order == '有':
+                        if delete_image and old['delivery_order_image']:
+                            old_images_to_delete.append(old['delivery_order_image'])
+                            new_delivery_image = None
+                            new_upload_status = '待上传'
+                        if delivery_order_image:
+                            path = self._save_delivery_image(delivery_order_image,
+                                                             data.get('vehicle_no') or old.get('vehicle_no'))
+                            temp_new_files.append(path)
+                            if old['delivery_order_image']:
+                                old_images_to_delete.append(old['delivery_order_image'])
+                            new_delivery_image = path
+                            new_upload_status = '已上传'
+                        # 凭证图片置空
+                        new_vouchers = []
+                    else:  # 无联单
+                        # 联单图片相关字段置空
+                        if old['delivery_order_image']:
+                            old_images_to_delete.append(old['delivery_order_image'])
+                        new_delivery_image = None
 
-                    if 'reporter_id' in data or 'reporter_name' in data:
-                        if data.get('reporter_name'):
-                            data['shipper'] = data['reporter_name']
+                        # 处理凭证图片：如果提供了新列表，则整体替换
+                        if voucher_images is not None:
+                            # 删除旧凭证图片文件
+                            for p in old_vouchers:
+                                if p and os.path.exists(p):
+                                    old_images_to_delete.append(p)
+                            # 保存新凭证图片
+                            new_paths = []
+                            for idx, img_bytes in enumerate(voucher_images):
+                                if len(new_paths) >= 6:
+                                    break  # 最多6张
+                                path = self._save_voucher_image(img_bytes,
+                                                                data.get('vehicle_no') or old.get('vehicle_no'), idx)
+                                temp_new_files.append(path)
+                                new_paths.append(path)
+                            new_vouchers = new_paths
+                            new_upload_status = '已上传' if new_paths else '待上传'
+                        # 如果没有提供 voucher_images，则保持原有凭证列表（不修改）
 
-                    # 如果修改了数量，重新计算车数（但不重新匹配合同）
-                    if 'quantity' in data and data['quantity']:
+                    # 准备更新数据
+                    update_data = {
+                        'has_delivery_order': has_order,
+                        'delivery_order_image': new_delivery_image,
+                        'upload_status': new_upload_status,
+                        'voucher_images': json.dumps(new_vouchers) if new_vouchers else None,
+                    }
+
+                    # 合并用户传入的其他字段
+                    for key in ['report_date', 'warehouse', 'target_factory_id', 'target_factory_name',
+                                'product_name', 'quantity', 'vehicle_no', 'driver_name', 'driver_phone',
+                                'driver_id_card', 'shipper', 'payee', 'service_fee', 'contract_no',
+                                'contract_unit_price', 'total_amount', 'status', 'reporter_id', 'reporter_name']:
+                        if key in data:
+                            update_data[key] = data[key]
+
+                    # 如果修改了数量，重新计算车数
+                    if 'quantity' in data:
                         new_quantity = Decimal(str(data['quantity']))
-                        new_planned_trucks = self._calculate_trucks(new_quantity)
-                        data['planned_trucks'] = new_planned_trucks
+                        update_data['planned_trucks'] = self._calculate_trucks(new_quantity)
 
-                    new_image_path = old_image_path
-                    upload_status = old_upload_status
-
-                    if delete_image and old_image_path:
-                        old_image_to_delete = old_image_path
-                        new_image_path = None
-                        upload_status = '待上传'
-                        if has_order == '有':
-                            data['service_fee'] = Decimal('0')
-
-                    if image_file:
-                        safe_name = re.sub(r'[^\w\-]', '_', str(delivery_id))
-                        filename = f"delivery_{safe_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}.jpg"
-                        file_path = UPLOAD_DIR / filename
-
-                        with open(file_path, "wb") as f:
-                            f.write(image_file)
-
-                        temp_new_file = str(file_path)
-                        new_image_path = temp_new_file
-                        upload_status = '已上传'
-
-                        if old_image_path:
-                            old_image_to_delete = old_image_path
-
-                    data['delivery_order_image'] = new_image_path
-                    data['upload_status'] = upload_status
-
-                    fields = [
-                        'report_date', 'warehouse', 'target_factory_id', 'target_factory_name',
-                        'product_name', 'quantity', 'planned_trucks', 'vehicle_no',
-                        'driver_name', 'driver_phone', 'driver_id_card',
-                        'has_delivery_order', 'delivery_order_image', 'upload_status', 'source_type',
-                        'shipper', 'payee', 'service_fee', 'contract_no', 'contract_unit_price', 'total_amount',
-                        'status', 'reporter_id', 'reporter_name'
-                    ]
-
-                    if self._delivery_has_products_column():
-                        fields.insert(5, 'products')
-                    elif 'products' in data:
-                        data.pop('products', None)
-
-                    update_fields = []
-                    params = []
-                    for f in fields:
-                        if f in data:
-                            update_fields.append(f"{f} = %s")
-                            params.append(data[f])
-
-                    if not update_fields and not delete_image and not image_file:
-                        return {"success": False, "error": "没有要更新的字段"}
-
+                    # 构建更新SQL
+                    fields = list(update_data.keys())
+                    set_clause = ', '.join([f"{f}=%s" for f in fields])
+                    params = [update_data[f] for f in fields]
                     params.append(delivery_id)
-                    sql = f"UPDATE pd_deliveries SET {', '.join(update_fields)} WHERE id = %s"
-                    cur.execute(sql, tuple(params))
+                    cur.execute(f"UPDATE pd_deliveries SET {set_clause} WHERE id = %s", tuple(params))
 
-                    if old_image_to_delete and os.path.exists(old_image_to_delete):
+                    # 删除旧图片文件
+                    for p in old_images_to_delete:
                         try:
-                            os.remove(old_image_to_delete)
+                            if os.path.exists(p):
+                                os.remove(p)
                         except Exception as e:
                             logger.warning(f"删除旧图片失败: {e}")
 
-                    operations = self._build_operations(has_order, upload_status, new_image_path)
-
+                    # 返回结果
+                    operations = self._build_operations(has_order, new_upload_status, new_delivery_image)
                     return {
                         "success": True,
                         "message": "更新成功",
                         "data": {
                             "id": delivery_id,
                             "has_delivery_order": has_order,
-                            "upload_status": upload_status,
-                            "delivery_order_image": new_image_path,
-                            "service_fee": float(data.get('service_fee', Decimal('0'))),
-                            "reporter_id": data.get('reporter_id'),
-                            "reporter_name": data.get('reporter_name'),
+                            "upload_status": new_upload_status,
+                            "delivery_order_image": new_delivery_image,
+                            "voucher_images": new_vouchers,
                             "operations": operations
                         }
                     }
 
         except Exception as e:
-            if temp_new_file and os.path.exists(temp_new_file):
+            # 清理临时新文件
+            for f in temp_new_files:
                 try:
-                    os.remove(temp_new_file)
+                    if os.path.exists(f):
+                        os.remove(f)
                 except:
                     pass
             logger.error(f"更新报货订单失败: {e}")
             return {"success": False, "error": str(e)}
+
+    def add_voucher_images(self, delivery_id: int, image_bytes_list: List[bytes], vehicle_no: str = None) -> Dict[
+        str, Any]:
+        """向指定订单追加凭证图片（最多6张）"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    # 查询现有凭证
+                    cur.execute("SELECT voucher_images, vehicle_no FROM pd_deliveries WHERE id = %s", (delivery_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return {"success": False, "error": "订单不存在"}
+                    if isinstance(row, dict):
+                        existing = row.get('voucher_images')
+                        vehicle_no = vehicle_no or row.get('vehicle_no')
+                    else:
+                        existing = row[0]
+                        vehicle_no = vehicle_no or row[1]
+
+                    current_vouchers = []
+                    if existing:
+                        try:
+                            current_vouchers = json.loads(existing)
+                        except:
+                            current_vouchers = []
+
+                    # 检查数量
+                    if len(current_vouchers) + len(image_bytes_list) > 6:
+                        return {"success": False, "error": f"凭证图片总数不能超过6张，当前已有{len(current_vouchers)}张"}
+
+                    # 保存新图片
+                    new_paths = []
+                    base_idx = len(current_vouchers)
+                    for idx, img_bytes in enumerate(image_bytes_list):
+                        path = self._save_voucher_image(img_bytes, vehicle_no, base_idx + idx)
+                        new_paths.append(path)
+                        current_vouchers.append(path)
+
+                    # 更新数据库
+                    cur.execute(
+                        "UPDATE pd_deliveries SET voucher_images = %s, upload_status = '已上传' WHERE id = %s",
+                        (json.dumps(current_vouchers), delivery_id)
+                    )
+                    conn.commit()
+                    return {"success": True, "message": "追加成功", "voucher_images": current_vouchers}
+        except Exception as e:
+            logger.error(f"追加凭证图片失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def remove_voucher_image(self, delivery_id: int, index: int) -> Dict[str, Any]:
+        """删除指定索引的凭证图片（0-based）"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT voucher_images FROM pd_deliveries WHERE id = %s", (delivery_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return {"success": False, "error": "订单不存在"}
+                    if isinstance(row, dict):
+                        existing = row.get('voucher_images')
+                    else:
+                        existing = row[0]
+
+                    if not existing:
+                        return {"success": False, "error": "没有凭证图片可删除"}
+
+                    vouchers = json.loads(existing)
+                    if index < 0 or index >= len(vouchers):
+                        return {"success": False, "error": f"索引 {index} 超出范围，当前共 {len(vouchers)} 张"}
+
+                    # 删除文件
+                    path_to_delete = vouchers.pop(index)
+                    if path_to_delete and os.path.exists(path_to_delete):
+                        os.remove(path_to_delete)
+
+                    # 更新数据库
+                    new_value = json.dumps(vouchers) if vouchers else None
+                    cur.execute(
+                        "UPDATE pd_deliveries SET voucher_images = %s WHERE id = %s",
+                        (new_value, delivery_id)
+                    )
+                    conn.commit()
+                    return {"success": True, "message": "删除成功", "voucher_images": vouchers}
+        except Exception as e:
+            logger.error(f"删除凭证图片失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def get_voucher_images(self, delivery_id: int) -> List[str]:
+        """获取凭证图片路径列表"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT voucher_images FROM pd_deliveries WHERE id = %s", (delivery_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return []
+                    val = row[0] if not isinstance(row, dict) else row.get('voucher_images')
+                    if not val:
+                        return []
+                    return json.loads(val)
+        except Exception as e:
+            logger.error(f"获取凭证图片失败: {e}")
+            return []
 
     def batch_update_delivery_images(self, items: List[Dict], uploaded_by: str) -> List[Dict]:
         """
@@ -1107,9 +1237,17 @@ class DeliveryService:
                     if not row:
                         return None
 
-                    data = dict(row) if isinstance(row, dict) else {
-                        desc[0]: row[idx] for idx, desc in enumerate(cur.description)
-                    }
+                    data = dict(row) if isinstance(row, dict) else {desc[0]: row[idx] for idx, desc in
+                                                                    enumerate(cur.description)}
+
+                    # 解析 voucher_images
+                    if data.get('voucher_images'):
+                        try:
+                            data['voucher_images'] = json.loads(data['voucher_images'])
+                        except:
+                            data['voucher_images'] = []
+                    else:
+                        data['voucher_images'] = []
 
                     for key in ['report_date', 'created_at', 'updated_at', 'uploaded_at']:
                         if data.get(key):
@@ -1290,6 +1428,14 @@ class DeliveryService:
                     data = []
                     for row in rows:
                         item = dict(row)
+                        # 解析 voucher_images
+                        if item.get('voucher_images'):
+                            try:
+                                item['voucher_images'] = json.loads(item['voucher_images'])
+                            except:
+                                item['voucher_images'] = []
+                        else:
+                            item['voucher_images'] = []
                         for key in ['report_date', 'created_at', 'updated_at', 'uploaded_at']:
                             if item.get(key):
                                 item[key] = str(item[key])
