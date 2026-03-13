@@ -1336,9 +1336,19 @@ class WeighbillService:
 
                         # 如果没有磅单记录，创建待上传占位
                         if not weighbills:
-                            # 当查询特定 ocr_status 且不是"待上传磅单"时，跳过该报单
+                            # 占位磅单只应在以下情况下出现：
+                            # 1. OCR 状态筛选为 None 或 "待上传磅单"
                             if exact_ocr_status and exact_ocr_status != "待上传磅单":
-                                continue  # 不将该报单加入结果
+                                continue
+                            # 2. 排款状态筛选为 None 或 0（待排期）
+                            if exact_schedule_status is not None and exact_schedule_status != 0:
+                                continue
+                            # 3. 打款状态筛选为 None 或 0（待打款）
+                            if exact_payout_status is not None and exact_payout_status != 0:
+                                continue
+                            # 4. 回款状态筛选为 None 或 0（待回款）
+                            if exact_collection_status is not None and exact_collection_status != 0:
+                                continue
 
                             for product in delivery.get('products', []):
                                 weighbills.append({
