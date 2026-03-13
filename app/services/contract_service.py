@@ -481,7 +481,11 @@ class ContractService:
                         if val >= 50:
                             total_quantity = val
                             break
-
+            for i, name in enumerate(names):
+                products.append({
+                    "product_name": name,
+                    "unit_price": Decimal(prices[i]) if i < len(prices) else Decimal("0"),
+                })
         return products, total_quantity
 
     def preprocess_image(self, image_path: str) -> str:
