@@ -163,7 +163,7 @@ class BalanceService:
                     warehouse_select = "w.warehouse_name" if self._has_weighbill_warehouse_name_column() else "NULL"
 
                     # 构建查询条件
-                    conditions = ["w.ocr_status IN ('已确认','已修正','已上传磅单')"]
+                    conditions = ["w.ocr_status IN ('待确认','已确认','已修正')"]
                     params = []
 
                     if contract_no:
