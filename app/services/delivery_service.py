@@ -1693,6 +1693,9 @@ class DeliveryService:
                         variety = mapping[0]
                 else:
                     variety = mapping
+            # 如果识别到通用短名称 '电动'，返回为 '电动车'（与前端约定的标准名一致）
+            if variety == '电动':
+                variety = '电动车'
             result['product_name'] = variety
 
         # === 7. 联单状态 ===
