@@ -10,7 +10,9 @@ from decimal import Decimal, ROUND_FLOOR
 from typing import List, Dict, Optional, Any, Tuple
 from contextlib import contextmanager
 from datetime import datetime, timedelta, date
-
+import cv2  # 新增导入
+import numpy as np
+from cv2 import dnn_superres  # 需确保 opencv-contrib-python 已安装
 import pymysql
 from PIL import Image, ImageEnhance, ImageFilter
 from pathlib import Path
@@ -124,6 +126,31 @@ class ContractService:
             logger.error(f"RapidOCR 初始化失败: {e}")
             raise
 
+    def _apply_super_resolution(self, image: Image.Image) -> Image.Image:
+        """如果可用，对图像应用超分辨率（2倍放大）"""
+        # 检查是否满足超分条件（图像尺寸较小）
+        if image.width < 800 or image.height < 600:
+            try:
+                # 尝试加载 FSRCNN 模型（请将模型文件放在 models/ 目录下）
+                model_path = Path(__file__).parent / "models" / "ESPCN_x2.pb"
+                if not model_path.exists():
+                    logger.warning("超分辨率模型文件不存在，跳过")
+                    return image
+
+                # 转换为 OpenCV 格式
+                img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+                sr = dnn_superres.DnnSuperResImpl.create()
+                sr.readModel(str(model_path))
+                sr.setModel("fsrcnn", 2)  # 2倍放大
+                result = sr.upsample(img_cv)
+
+                # 转回 PIL Image
+                result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
+                return Image.fromarray(result_rgb)
+            except Exception as e:
+                logger.error(f"超分辨率处理失败: {e}")
+                return image
+        return image
     def recognize_contract(self, image_path: str) -> Dict[str, Any]:
         """OCR识别合同 - 即使不完整也返回结果"""
         try:
@@ -489,11 +516,14 @@ class ContractService:
         return products, total_quantity
 
     def preprocess_image(self, image_path: str) -> str:
-        """图片预处理"""
+        """图片预处理（含超分辨率）"""
         try:
             img = Image.open(image_path)
             if img.mode != "RGB":
                 img = img.convert("RGB")
+
+            # 新增：超分辨率处理
+            img = self._apply_super_resolution(img)
 
             enhancer = ImageEnhance.Contrast(img)
             img = enhancer.enhance(1.5)

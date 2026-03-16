@@ -7,7 +7,10 @@ import re
 import tempfile
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
-
+import cv2  # 新增导入
+import numpy as np
+from cv2 import dnn_superres
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
@@ -59,12 +62,37 @@ class WeighbillService:
 
     # ========== 图片预处理 ==========
 
+    def _apply_super_resolution(self, image: Image.Image) -> Image.Image:
+        """同 contract_service 中的实现"""
+        if image.width < 800 or image.height < 600:
+            try:
+                # 模型路径可根据项目结构调整，此处放在 app/models/ 下
+                model_path = Path(__file__).parent / "models" / "ESPCN_x2.pb"
+                if not model_path.exists():
+                    logger.warning("超分辨率模型文件不存在，跳过")
+                    return image
+
+                img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+                sr = dnn_superres.DnnSuperResImpl.create()
+                sr.readModel(str(model_path))
+                sr.setModel("fsrcnn", 2)
+                result = sr.upsample(img_cv)
+
+                result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
+                return Image.fromarray(result_rgb)
+            except Exception as e:
+                logger.error(f"超分辨率处理失败: {e}")
+                return image
+        return image
+
     def preprocess_image(self, image_path: str) -> str:
-        """图片预处理"""
         try:
             img = Image.open(image_path)
             if img.mode != "RGB":
                 img = img.convert("RGB")
+
+            # 新增超分辨率处理
+            img = self._apply_super_resolution(img)
 
             enhancer = ImageEnhance.Contrast(img)
             img = enhancer.enhance(1.5)
