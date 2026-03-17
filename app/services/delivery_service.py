@@ -876,12 +876,14 @@ class DeliveryService:
                         'vehicle_no': old[8],
                     }
 
-                    # 解析原凭证图片列表
+                    # 解析原凭证图片列表（兼容历史数据中可能存储的布尔或非列表值）
                     old_vouchers = []
-                    if old.get('voucher_images'):
+                    raw_vouchers = old.get('voucher_images')
+                    if raw_vouchers:
                         try:
-                            old_vouchers = json.loads(old['voucher_images'])
-                        except:
+                            parsed = json.loads(raw_vouchers) if isinstance(raw_vouchers, str) else raw_vouchers
+                            old_vouchers = parsed if isinstance(parsed, list) else []
+                        except Exception:
                             old_vouchers = []
 
                     has_order = self._normalize_has_delivery_order(
@@ -900,7 +902,7 @@ class DeliveryService:
                     # ---------- 处理图片 ----------
                     new_delivery_image = old['delivery_order_image']
                     new_upload_status = old['upload_status']
-                    new_vouchers = old_vouchers.copy() if old_vouchers else []
+                    new_vouchers = old_vouchers.copy() if isinstance(old_vouchers, list) else []
 
                     # 处理联单图片（有联单时）
                     if has_order == '有':
@@ -927,7 +929,7 @@ class DeliveryService:
                         # 处理凭证图片：如果提供了新列表，则整体替换
                         if voucher_images is not None:
                             # 删除旧凭证图片文件
-                            for p in old_vouchers:
+                            for p in list(old_vouchers):
                                 if p and os.path.exists(p):
                                     old_images_to_delete.append(p)
                             # 保存新凭证图片
@@ -1030,8 +1032,9 @@ class DeliveryService:
                     current_vouchers = []
                     if existing:
                         try:
-                            current_vouchers = json.loads(existing)
-                        except:
+                            parsed = json.loads(existing) if isinstance(existing, str) else existing
+                            current_vouchers = parsed if isinstance(parsed, list) else []
+                        except Exception:
                             current_vouchers = []
 
                     # 检查数量
@@ -1074,7 +1077,15 @@ class DeliveryService:
                     if not existing:
                         return {"success": False, "error": "没有凭证图片可删除"}
 
-                    vouchers = json.loads(existing)
+                    try:
+                        parsed = json.loads(existing) if isinstance(existing, str) else existing
+                        vouchers = parsed if isinstance(parsed, list) else []
+                    except Exception:
+                        vouchers = []
+
+                    if not vouchers:
+                        return {"success": False, "error": "没有凭证图片可删除"}
+
                     if index < 0 or index >= len(vouchers):
                         return {"success": False, "error": f"索引 {index} 超出范围，当前共 {len(vouchers)} 张"}
 
@@ -1107,7 +1118,11 @@ class DeliveryService:
                     val = row[0] if not isinstance(row, dict) else row.get('voucher_images')
                     if not val:
                         return []
-                    return json.loads(val)
+                    try:
+                        parsed = json.loads(val) if isinstance(val, str) else val
+                        return parsed if isinstance(parsed, list) else []
+                    except Exception:
+                        return []
         except Exception as e:
             logger.error(f"获取凭证图片失败: {e}")
             return []
@@ -1267,11 +1282,13 @@ class DeliveryService:
                     data = dict(row) if isinstance(row, dict) else {desc[0]: row[idx] for idx, desc in
                                                                     enumerate(cur.description)}
 
-                    # 解析 voucher_images
-                    if data.get('voucher_images'):
+                    # 解析 voucher_images（兼容历史非列表或布尔值）
+                    raw_vouchers = data.get('voucher_images')
+                    if raw_vouchers:
                         try:
-                            data['voucher_images'] = json.loads(data['voucher_images'])
-                        except:
+                            parsed = json.loads(raw_vouchers) if isinstance(raw_vouchers, str) else raw_vouchers
+                            data['voucher_images'] = parsed if isinstance(parsed, list) else []
+                        except Exception:
                             data['voucher_images'] = []
                     else:
                         data['voucher_images'] = []
@@ -1462,11 +1479,13 @@ class DeliveryService:
                     data = []
                     for row in rows:
                         item = dict(row)
-                        # 解析 voucher_images
-                        if item.get('voucher_images'):
+                        # 解析 voucher_images（兼容历史非列表或布尔值）
+                        raw_vouchers = item.get('voucher_images')
+                        if raw_vouchers:
                             try:
-                                item['voucher_images'] = json.loads(item['voucher_images'])
-                            except:
+                                parsed = json.loads(raw_vouchers) if isinstance(raw_vouchers, str) else raw_vouchers
+                                item['voucher_images'] = parsed if isinstance(parsed, list) else []
+                            except Exception:
                                 item['voucher_images'] = []
                         else:
                             item['voucher_images'] = []
