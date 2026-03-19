@@ -234,6 +234,18 @@ class ContractService:
             text = text.replace(wrong, right)
         return text
 
+    def _extract_prepayment_ratio(self, text: str) -> Optional[Decimal]:
+        """提取预付比例（如 甲方预付合同80%）"""
+        patterns = [
+            r"预付.*?(\d+)%",  # 通用预付模式
+            r"甲方预付合同(\d+)%",  # 具体甲方预付
+            r"预付款.*?(\d+)%",  # 预付款模式
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return Decimal(str(int(match.group(1)) / 100))
+        return None
     def _parse_contract(self, text_lines: List[Dict], full_text: str) -> Dict:
         """解析合同信息 - 缺失字段留空"""
 
@@ -241,7 +253,13 @@ class ContractService:
         contract_date = self._extract_contract_date(full_text)
         end_date = self._extract_end_date(full_text) or self._infer_end_date(contract_date)
         smelter = self._extract_smelter(full_text)
-        arrival_ratio = self._extract_payment_ratio(full_text)
+
+        # 优先提取预付比例，若没有则使用到货款比例
+        prepayment_ratio = self._extract_prepayment_ratio(full_text)
+        if prepayment_ratio:
+            arrival_ratio = prepayment_ratio
+        else:
+            arrival_ratio = self._extract_payment_ratio(full_text)
 
         try:
             products, total_quantity = self._extract_products_multiline(text_lines)
@@ -259,6 +277,13 @@ class ContractService:
         logger.info(f"[truck_count] 传入 total_quantity: {total_quantity}")
         truck_count = self._calculate_truck_count(total_quantity)
 
+        # 根据提取的比例设置首笔和尾款比例
+        if arrival_ratio:
+            final_ratio = Decimal("1") - arrival_ratio
+        else:
+            arrival_ratio = Decimal("0.9")
+            final_ratio = Decimal("0.1")
+
         return {
             "contract_no": contract_no,
             "contract_date": contract_date,
@@ -266,8 +291,8 @@ class ContractService:
             "smelter_company": smelter,
             "total_quantity": float(total_quantity) if total_quantity else None,
             "truck_count": float(truck_count) if truck_count else None,
-            "arrival_payment_ratio": float(arrival_ratio) if arrival_ratio else 0.9,
-            "final_payment_ratio": float(Decimal("1") - arrival_ratio) if arrival_ratio else 0.1,
+            "arrival_payment_ratio": float(arrival_ratio),
+            "final_payment_ratio": float(final_ratio),
             "products": products if products else [],
             "contract_unit_price": float(main_price) if main_price else None,
             "remittance_unit_price": float(main_price) if main_price else None,
