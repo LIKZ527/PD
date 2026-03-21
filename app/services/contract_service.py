@@ -638,26 +638,25 @@ class ContractService:
         """创建合同（包含品种明细）"""
         try:
             _ensure_contract_delivery_plan_id_column()
-            plan_id = data.get("delivery_plan_id")
-            if plan_id is None:
-                return {"success": False, "error": "必须指定报货计划 delivery_plan_id"}
-            try:
-                plan_id = int(plan_id)
-            except (TypeError, ValueError):
-                return {"success": False, "error": "delivery_plan_id 无效"}
-            data["delivery_plan_id"] = plan_id
+            plan_no = (data.get("plan_no") or "").strip()
+            if not plan_no:
+                return {"success": False, "error": "必须指定报货计划编号 plan_no"}
 
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT id FROM pd_delivery_plans WHERE id = %s",
-                        (plan_id,),
+                        "SELECT id FROM pd_delivery_plans WHERE plan_no = %s",
+                        (plan_no,),
                     )
-                    if not cur.fetchone():
+                    row = cur.fetchone()
+                    if not row:
                         return {
                             "success": False,
-                            "error": f"报货计划 ID {plan_id} 不存在",
+                            "error": f"报货计划编号不存在: {plan_no}",
                         }
+                    pid = row[0] if not isinstance(row, dict) else row["id"]
+            data["delivery_plan_id"] = pid
+            data.pop("plan_no", None)
 
             # 检查合同编号是否已存在（包括已删除的）
             with get_conn() as conn:
@@ -750,23 +749,26 @@ class ContractService:
         """更新合同（含图片重命名）"""
         try:
             _ensure_contract_delivery_plan_id_column()
-            if "delivery_plan_id" in data and data["delivery_plan_id"] is not None:
-                try:
-                    pid = int(data["delivery_plan_id"])
-                except (TypeError, ValueError):
-                    return {"success": False, "error": "delivery_plan_id 无效"}
-                data["delivery_plan_id"] = pid
-                with get_conn() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT id FROM pd_delivery_plans WHERE id = %s",
-                            (pid,),
-                        )
-                        if not cur.fetchone():
-                            return {
-                                "success": False,
-                                "error": f"报货计划 ID {pid} 不存在",
-                            }
+            if "plan_no" in data:
+                raw_pn = data.pop("plan_no")
+                if raw_pn is None or (isinstance(raw_pn, str) and not raw_pn.strip()):
+                    data["delivery_plan_id"] = None
+                else:
+                    plan_no = str(raw_pn).strip()
+                    with get_conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT id FROM pd_delivery_plans WHERE plan_no = %s",
+                                (plan_no,),
+                            )
+                            row = cur.fetchone()
+                            if not row:
+                                return {
+                                    "success": False,
+                                    "error": f"报货计划编号不存在: {plan_no}",
+                                }
+                            pid = row[0] if not isinstance(row, dict) else row["id"]
+                    data["delivery_plan_id"] = pid
             if "total_quantity" in data:
                 data["truck_count"] = self._calculate_truck_count(data.get("total_quantity"))
             with get_conn() as conn:
@@ -887,6 +889,24 @@ class ContractService:
                     if contract.get('seq_no') is None:
                         contract['seq_no'] = contract['id']
 
+                    dpid = contract.get("delivery_plan_id")
+                    if dpid:
+                        cur.execute(
+                            "SELECT plan_no FROM pd_delivery_plans WHERE id = %s",
+                            (dpid,),
+                        )
+                        pn_row = cur.fetchone()
+                        if pn_row:
+                            contract["plan_no"] = (
+                                pn_row[0]
+                                if not isinstance(pn_row, dict)
+                                else pn_row.get("plan_no")
+                            )
+                        else:
+                            contract["plan_no"] = None
+                    else:
+                        contract["plan_no"] = None
+
                     cur.execute("""
                         SELECT * FROM pd_contract_products 
                         WHERE contract_id = %s ORDER BY sort_order
@@ -979,6 +999,7 @@ class ContractService:
                     offset = (page - 1) * page_size
                     cur.execute(f"""
                         SELECT c.*, 
+                               (SELECT dp.plan_no FROM pd_delivery_plans dp WHERE dp.id = c.delivery_plan_id) AS plan_no,
                                (SELECT COUNT(*) FROM pd_contract_products WHERE contract_id = c.id) as product_count,
                                (SELECT COUNT(*) FROM pd_deliveries d WHERE d.contract_no = c.contract_no) as delivery_count
                         FROM pd_contracts c

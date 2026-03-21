@@ -63,7 +63,12 @@ class ContractOCRResponse(BaseModel):
 
 class ContractCreateRequest(BaseModel):
     contract_no: str
-    delivery_plan_id: int = Field(..., description="报货计划主键 id（pd_delivery_plans.id）")
+    plan_no: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="报货计划编号（pd_delivery_plans.plan_no，唯一）",
+    )
     contract_date: Optional[str] = None
     end_date: Optional[str] = None
     smelter_company: Optional[str] = None
@@ -77,8 +82,9 @@ class ContractCreateRequest(BaseModel):
 
 class ContractUpdateRequest(BaseModel):
     contract_no: Optional[str] = None
-    delivery_plan_id: Optional[int] = Field(
-        None, description="报货计划主键 id；传入 null 可解除绑定"
+    plan_no: Optional[str] = Field(
+        None,
+        description="报货计划编号；不传则不修改，传 null 或空字符串可解除与报货计划的绑定",
     )
     contract_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -96,6 +102,9 @@ class ContractOut(BaseModel):
     seq_no: Optional[int] = None
     contract_no: str
     delivery_plan_id: Optional[int] = None
+    plan_no: Optional[str] = Field(
+        None, description="关联报货计划编号（与 delivery_plan_id 对应）"
+    )
     contract_date: Optional[date] = None
     end_date: Optional[date] = None
     smelter_company: Optional[str] = None
@@ -118,9 +127,9 @@ async def ocr_recognize(
     file: UploadFile = File(..., description="合同图片"),
     auto_save: bool = Query(True, description="是否自动保存（默认true，OCR可能不完整）"),
     save_image: bool = Query(False, description="是否保存图片"),
-    delivery_plan_id: Optional[int] = Query(
+    plan_no: Optional[str] = Query(
         None,
-        description="自动写入数据库时必须传入：报货计划 id（pd_delivery_plans.id）",
+        description="自动写入数据库时必须传入：报货计划编号（pd_delivery_plans.plan_no）",
     ),
     service: ContractService = Depends(get_contract_service),
 ):
@@ -170,15 +179,15 @@ async def ocr_recognize(
                 data["saved_to_db"] = False
                 data["db_message"] = f"合同 {contract_no} 已存在"
                 data["contract_id"] = existing["id"]
-            elif delivery_plan_id is None:
+            elif not (plan_no or "").strip():
                 data["saved_to_db"] = False
                 data["db_message"] = (
-                    "自动保存已跳过：请在请求中传入查询参数 delivery_plan_id（报货计划 id）"
+                    "自动保存已跳过：请在请求中传入查询参数 plan_no（报货计划编号）"
                 )
             else:
                 save_data = {
                     "contract_no": contract_no,
-                    "delivery_plan_id": delivery_plan_id,
+                    "plan_no": plan_no.strip(),
                     "contract_date": data.get("contract_date"),
                     "end_date": data.get("end_date"),
                     "smelter_company": data.get("smelter_company"),
@@ -244,7 +253,7 @@ async def create_manual(
     contract_data格式示例：
     {
         "contract_no": "HT-2024-001",
-        "delivery_plan_id": 1,
+        "plan_no": "BH-2024-001",
         "contract_date": "2024-01-15",
         "end_date": "2024-01-20",
         "smelter_company": "河南金利金铅集团有限公司",
@@ -295,7 +304,7 @@ async def create_manual(
     try:
         data = {
             "contract_no": request.contract_no,
-            "delivery_plan_id": request.delivery_plan_id,
+            "plan_no": request.plan_no,
             "contract_date": request.contract_date,
             "end_date": request.end_date,
             "smelter_company": request.smelter_company,
@@ -388,7 +397,7 @@ async def update_contract(
     contract_data格式示例（可选，如果不传则不更新字段）：
     {
         "contract_no": "HT-2024-001",
-        "delivery_plan_id": 1,
+        "plan_no": "BH-2024-001",
         "contract_date": "2024-01-15",
         "end_date": "2024-01-20",
         "smelter_company": "河南金利金铅集团有限公司",
@@ -472,8 +481,8 @@ async def update_contract(
             if request.remarks is not None:
                 data["remarks"] = request.remarks
             patch = request.model_dump(exclude_unset=True)
-            if "delivery_plan_id" in patch:
-                data["delivery_plan_id"] = patch["delivery_plan_id"]
+            if "plan_no" in patch:
+                data["plan_no"] = patch["plan_no"]
 
         # 如果有新图片，添加到更新数据
         if new_image_path:
