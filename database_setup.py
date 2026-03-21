@@ -241,6 +241,28 @@ TABLE_STATEMENTS = [
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='报货计划品类与单价表';
 	""",
 	"""
+	CREATE TABLE IF NOT EXISTS pd_order_plans (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+		delivery_plan_id BIGINT NOT NULL COMMENT '报货计划ID（关联pd_delivery_plans.id）',
+		plan_no VARCHAR(64) NOT NULL COMMENT '报货计划编号（冗余，便于筛选）',
+		smelter_name VARCHAR(128) DEFAULT NULL COMMENT '冶炼厂（关联报货计划时从报货计划带入）',
+		truck_count INT NOT NULL DEFAULT 0 COMMENT '订货车数',
+		audit_status VARCHAR(32) NOT NULL DEFAULT '待审核' COMMENT '审核状态：待审核/审核通过/审核未通过',
+		created_by BIGINT DEFAULT NULL COMMENT '创建人用户ID',
+		created_by_name VARCHAR(64) DEFAULT NULL COMMENT '创建人姓名',
+		updated_by BIGINT DEFAULT NULL COMMENT '最后操作人用户ID',
+		updated_by_name VARCHAR(64) DEFAULT NULL COMMENT '最后操作人姓名',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后操作时间',
+		INDEX idx_delivery_plan_id (delivery_plan_id),
+		INDEX idx_plan_no (plan_no),
+		INDEX idx_audit_status (audit_status),
+		INDEX idx_smelter_name (smelter_name),
+		INDEX idx_updated_at (updated_at),
+		FOREIGN KEY (delivery_plan_id) REFERENCES pd_delivery_plans(id) ON DELETE RESTRICT
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订货计划表';
+	""",
+	"""
 	CREATE TABLE IF NOT EXISTS pd_weighbills (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
 		weigh_date DATE COMMENT '磅单日期',
