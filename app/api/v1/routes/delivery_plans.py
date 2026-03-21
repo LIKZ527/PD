@@ -1,5 +1,5 @@
 """
-报货计划：录入、查询、修改
+报货计划：录入、查询、修改、删除
 """
 from typing import Optional
 
@@ -83,4 +83,18 @@ async def update_delivery_plan(
         raise HTTPException(status_code=404, detail=err)
     if "计划编号已存在" in str(err):
         raise HTTPException(status_code=400, detail=err)
+    raise HTTPException(status_code=400, detail=err)
+
+
+@router.delete("/{plan_id}", summary="删除报货计划", response_model=dict)
+async def delete_delivery_plan(
+    plan_id: int,
+    service: DeliveryPlanService = Depends(get_delivery_plan_service),
+):
+    result = service.delete_plan(plan_id)
+    if result.get("success"):
+        return result
+    err = result.get("error", "删除失败")
+    if "不存在" in str(err):
+        raise HTTPException(status_code=404, detail=err)
     raise HTTPException(status_code=400, detail=err)

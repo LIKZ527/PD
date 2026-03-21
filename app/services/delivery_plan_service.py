@@ -1,5 +1,5 @@
 """
-报货计划：录入、查询与更新
+报货计划：录入、查询、更新与删除
 """
 import logging
 from datetime import date, datetime
@@ -161,6 +161,19 @@ class DeliveryPlanService:
             if "Duplicate entry" in err and "uk_plan_no" in err:
                 return {"success": False, "error": "计划编号已存在"}
             return {"success": False, "error": err}
+
+    def delete_plan(self, plan_id: int) -> Dict[str, Any]:
+        try:
+            with get_conn() as conn:
+                with conn.cursor(DictCursor) as cur:
+                    cur.execute("DELETE FROM pd_delivery_plans WHERE id = %s", (plan_id,))
+                    if cur.rowcount == 0:
+                        return {"success": False, "error": f"报货计划 ID {plan_id} 不存在"}
+                    conn.commit()
+                    return {"success": True, "message": "报货计划已删除", "data": {"id": plan_id}}
+        except Exception as e:
+            logger.error("delete delivery plan failed: %s", e)
+            return {"success": False, "error": str(e)}
 
 
 _delivery_plan_service: Optional[DeliveryPlanService] = None
