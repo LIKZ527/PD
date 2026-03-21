@@ -248,6 +248,7 @@ TABLE_STATEMENTS = [
 		smelter_name VARCHAR(128) DEFAULT NULL COMMENT '冶炼厂（关联报货计划时从报货计划带入）',
 		truck_count INT NOT NULL DEFAULT 0 COMMENT '订货车数',
 		audit_status VARCHAR(32) NOT NULL DEFAULT '待审核' COMMENT '审核状态：待审核/审核通过/审核未通过',
+		audit_remark TEXT DEFAULT NULL COMMENT '审核备注/原因',
 		created_by BIGINT DEFAULT NULL COMMENT '创建人用户ID',
 		created_by_name VARCHAR(64) DEFAULT NULL COMMENT '创建人姓名',
 		updated_by BIGINT DEFAULT NULL COMMENT '最后操作人用户ID',

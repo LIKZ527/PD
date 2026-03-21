@@ -55,6 +55,37 @@ def _ensure_plan_audit_columns() -> None:
         logger.warning("ensure_plan_audit_columns skipped/failed: %s", e)
 
 
+def apply_increment_confirmed_trucks(
+    cur,
+    plan_no: str,
+    truck_count: int,
+    *,
+    operator_id: Optional[int] = None,
+    operator_name: Optional[str] = None,
+) -> None:
+    """
+    与 increment-confirmed-trucks 接口相同的累加逻辑，在调用方事务内执行（不 commit）。
+    confirmed_trucks 可超过 planned_trucks；此时 unconfirmed_trucks 为 0（GREATEST(0, planned - 新已定)）。
+    truck_count < 1 时为无副作用的成功（不执行 UPDATE）。
+    """
+    if truck_count < 1:
+        return
+    _ensure_plan_audit_columns()
+    cur.execute(
+        """
+        UPDATE pd_delivery_plans
+        SET confirmed_trucks = confirmed_trucks + %s,
+            unconfirmed_trucks = GREATEST(0, planned_trucks - confirmed_trucks - %s),
+            updated_by = %s,
+            updated_by_name = %s
+        WHERE plan_no = %s
+        """,
+        (truck_count, truck_count, operator_id, operator_name, plan_no),
+    )
+    if cur.rowcount == 0:
+        raise ValueError(f"报货计划编号不存在: {plan_no}")
+
+
 def _serialize_row(row: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(row)
     for key, val in out.items():
@@ -212,23 +243,19 @@ class DeliveryPlanService:
     ) -> Dict[str, Any]:
         if truck_count < 1:
             return {"success": False, "error": "车数须为正整数"}
-        _ensure_plan_audit_columns()
         try:
             with get_conn() as conn:
                 with conn.cursor(DictCursor) as cur:
-                    cur.execute(
-                        """
-                        UPDATE pd_delivery_plans
-                        SET confirmed_trucks = confirmed_trucks + %s,
-                            unconfirmed_trucks = GREATEST(0, planned_trucks - confirmed_trucks - %s),
-                            updated_by = %s,
-                            updated_by_name = %s
-                        WHERE plan_no = %s
-                        """,
-                        (truck_count, truck_count, operator_id, operator_name, plan_no),
-                    )
-                    if cur.rowcount == 0:
-                        return {"success": False, "error": f"报货计划编号不存在: {plan_no}"}
+                    try:
+                        apply_increment_confirmed_trucks(
+                            cur,
+                            plan_no,
+                            truck_count,
+                            operator_id=operator_id,
+                            operator_name=operator_name,
+                        )
+                    except ValueError as e:
+                        return {"success": False, "error": str(e)}
                     conn.commit()
                     cur.execute(
                         f"""

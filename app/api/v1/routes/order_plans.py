@@ -1,7 +1,7 @@
 """
-订货计划：录入、列表筛选、仅修改车数（非会计改车数后状态回退为待审核）
+订货计划：录入、列表筛选、仅修改车数（非会计改车数后状态回退为待审核）、审核
 """
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -36,6 +36,17 @@ class OrderPlanTruckCountPatch(BaseModel):
     truck_count: int = Field(..., ge=0, description="订货车数")
 
 
+class OrderPlanAuditRequest(BaseModel):
+    audit_result: Literal["审核通过", "审核未通过"] = Field(
+        ..., description="审核结论：审核通过 / 审核未通过"
+    )
+    remark: Optional[str] = Field(
+        None,
+        max_length=4000,
+        description="审核原因或备注（可选）",
+    )
+
+
 @router.post("/", summary="录入订货计划", response_model=dict)
 async def create_order_plan(
     request: OrderPlanCreateRequest,
@@ -52,6 +63,33 @@ async def create_order_plan(
     if result.get("success"):
         return result
     err = result.get("error", "录入失败")
+    if "不存在" in str(err):
+        raise HTTPException(status_code=404, detail=err)
+    raise HTTPException(status_code=400, detail=err)
+
+
+@router.post(
+    "/{order_plan_id}/audit",
+    summary="审核订货计划（通过时按车数累加报货计划已定车数，与 increment-confirmed-trucks 同逻辑）",
+    response_model=dict,
+)
+async def audit_order_plan(
+    order_plan_id: int,
+    body: OrderPlanAuditRequest,
+    current_user: dict = Depends(get_current_user),
+    service: OrderPlanService = Depends(get_order_plan_service),
+):
+    op_id, op_name = _operator_from_user(current_user)
+    result = service.audit(
+        order_plan_id,
+        body.audit_result,
+        body.remark,
+        operator_id=op_id,
+        operator_name=op_name,
+    )
+    if result.get("success"):
+        return result
+    err = result.get("error", "审核失败")
     if "不存在" in str(err):
         raise HTTPException(status_code=404, detail=err)
     raise HTTPException(status_code=400, detail=err)

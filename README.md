@@ -143,6 +143,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8007
 - `GET /api/v1/order-plans/`：分页列表；支持 `audit_status`、`plan_no`、`smelter_name`、`operator_name`、`updated_from`、`updated_to` 等查询参数。
 - `GET /api/v1/order-plans/{id}`：详情。
 - `PATCH /api/v1/order-plans/{id}/truck-count`：仅改车数（需登录）；非「会计」角色修改后状态重置为「待审核」，「会计」不改状态。
+- `POST /api/v1/order-plans/{id}/audit`：审核（需登录）； body：`audit_result` 为「审核通过」或「审核未通过」，可选 `remark`。仅「待审核」可审；**通过**时按本条 `truck_count` 调用与 `POST /delivery-plans/increment-confirmed-trucks` 相同的累加规则更新报货计划的 `confirmed_trucks` / `unconfirmed_trucks`（`truck_count` 为 0 时不改报货计划；已定车数可超过计划车数，此时未定车数为 0）。
 
 ### 磅单管理（`/api/v1/weighbills`）
 
