@@ -137,6 +137,13 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8007
 - `DELETE /api/v1/deliveries/{delivery_id}`：删除。
 - `POST /api/v1/deliveries/{delivery_id}/upload-order`：上传报货单附件。
 
+### 订货计划（`/api/v1/order-plans`）
+
+- `POST /api/v1/order-plans/`：录入（需登录）； body：`plan_no`（报货计划编号）、`truck_count`；自动带入报货计划的冶炼厂；审核状态默认「待审核」。
+- `GET /api/v1/order-plans/`：分页列表；支持 `audit_status`、`plan_no`、`smelter_name`、`operator_name`、`updated_from`、`updated_to` 等查询参数。
+- `GET /api/v1/order-plans/{id}`：详情。
+- `PATCH /api/v1/order-plans/{id}/truck-count`：仅改车数（需登录）；非「会计」角色修改后状态重置为「待审核」，「会计」不改状态。
+
 ### 磅单管理（`/api/v1/weighbills`）
 
 - `POST /api/v1/weighbills/ocr`：上传磅单图片并 OCR。
