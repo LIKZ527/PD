@@ -704,12 +704,19 @@ class WeighbillService:
                         )
                     
                     if final_contract_no:
-                        with get_conn() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("SELECT id FROM pd_contracts WHERE contract_no = %s", (final_contract_no,))
-                                row = cur.fetchone()
+                        # 必须用独立连接变量名，避免覆盖外层 conn/cur，否则内层 with 结束后
+                        # cur 指向已关闭游标，后续 UPDATE/INSERT 会报 Cursor closed
+                        with get_conn() as conn_contract:
+                            with conn_contract.cursor() as cur_contract:
+                                cur_contract.execute(
+                                    "SELECT id FROM pd_contracts WHERE contract_no = %s",
+                                    (final_contract_no,),
+                                )
+                                row = cur_contract.fetchone()
                                 if row:
-                                    final_contract_id = row[0] if not isinstance(row, dict) else row["id"]
+                                    final_contract_id = (
+                                        row[0] if not isinstance(row, dict) else row["id"]
+                                    )
 
                     net_weight_decimal = Decimal(str(final_net_weight)).quantize(Decimal('0.001'), rounding=ROUND_HALF_UP)
                     gross_weight_decimal = None if final_gross_weight in (None, "") else Decimal(str(final_gross_weight)).quantize(Decimal('0.001'), rounding=ROUND_HALF_UP)
