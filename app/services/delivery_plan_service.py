@@ -3,6 +3,7 @@
 """
 import logging
 import math
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,12 @@ from pymysql.cursors import DictCursor
 from app.services.contract_service import get_conn
 
 logger = logging.getLogger(__name__)
+
+
+def _mysql_duplicate_entry_value(err_msg: str) -> Optional[str]:
+    """从 MySQL 1062 错误信息中解析冲突键值，如 Duplicate entry '0324' for key ..."""
+    m = re.search(r"Duplicate entry '([^']+)' for key", err_msg)
+    return m.group(1) if m else None
 
 _PLAN_AUDIT_COLS_ENSURED = False
 
@@ -248,12 +255,16 @@ class DeliveryPlanService:
                 "data": out_data,
             }
         except Exception as e:
-            logger.error("create delivery plan failed: %s", e)
             err = str(e)
             if "Duplicate entry" in err and "uk_plan_no" in err:
-                return {"success": False, "error": "计划编号已存在"}
+                dup = _mysql_duplicate_entry_value(err)
+                msg = f"计划编号已存在：{dup}" if dup else "计划编号已存在"
+                logger.warning("create delivery plan duplicate: %s", msg)
+                return {"success": False, "error": msg}
             if "Duplicate entry" in err and "uk_plan_category" in err:
+                logger.warning("create delivery plan duplicate category: %s", err)
                 return {"success": False, "error": "同一计划下品类不能重复"}
+            logger.exception("create delivery plan failed: %s", e)
             return {"success": False, "error": err}
 
     def increment_confirmed_trucks_by_plan_no(
@@ -496,12 +507,16 @@ class DeliveryPlanService:
                 out_data = detail.get("data") if detail.get("success") else {"id": plan_id}
                 return {"success": True, "message": "报货计划更新成功", "data": out_data}
         except Exception as e:
-            logger.error("update delivery plan failed: %s", e)
             err = str(e)
             if "Duplicate entry" in err and "uk_plan_no" in err:
-                return {"success": False, "error": "计划编号已存在"}
+                dup = _mysql_duplicate_entry_value(err)
+                msg = f"计划编号已存在：{dup}" if dup else "计划编号已存在"
+                logger.warning("update delivery plan duplicate: %s", msg)
+                return {"success": False, "error": msg}
             if "Duplicate entry" in err and "uk_plan_category" in err:
+                logger.warning("update delivery plan duplicate category: %s", err)
                 return {"success": False, "error": "同一计划下品类不能重复"}
+            logger.exception("update delivery plan failed: %s", e)
             return {"success": False, "error": err}
 
     def delete_plan(self, plan_id: int) -> Dict[str, Any]:
