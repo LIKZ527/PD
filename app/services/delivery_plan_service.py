@@ -90,6 +90,7 @@ def apply_increment_confirmed_trucks(
     与 increment-confirmed-trucks 接口相同的累加逻辑，在调用方事务内执行（不 commit）。
     confirmed_trucks 可超过 planned_trucks；此时 unconfirmed_trucks 为 0（GREATEST(0, planned - 新已定)）。
     truck_count < 1 时为无副作用的成功（不执行 UPDATE）。
+    累加后若已定车数已满（>= 计划车数且计划车数>0），自动将报货计划 plan_status 置为「已失效」。
 
     注意：MySQL 单表 UPDATE 中赋值从左到右，后列会读到前列已更新的值。
     必须先写 unconfirmed_trucks（仍基于原 confirmed_trucks），再写 confirmed_trucks += truck_count，
@@ -111,6 +112,22 @@ def apply_increment_confirmed_trucks(
     )
     if cur.rowcount == 0:
         raise ValueError(f"报货计划编号不存在: {plan_no}")
+    refresh_delivery_plan_status_if_full(cur, plan_no)
+
+
+def refresh_delivery_plan_status_if_full(cur, plan_no: str) -> None:
+    """已定车数达到或超过计划车数时，将仍为「生效中」的报货计划自动标记为「已失效」。"""
+    cur.execute(
+        """
+        UPDATE pd_delivery_plans
+        SET plan_status = '已失效'
+        WHERE plan_no = %s
+          AND plan_status = '生效中'
+          AND planned_trucks > 0
+          AND confirmed_trucks >= planned_trucks
+        """,
+        (plan_no,),
+    )
 
 
 def _serialize_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -213,32 +230,6 @@ class DeliveryPlanService:
                 plan_id: Optional[int] = None
                 try:
                     with conn.cursor(DictCursor) as cur:
-                        # 业务约束：一个用户只能存在一条订货计划记录
-                        if operator_id is not None:
-                            cur.execute(
-                                "SELECT id, plan_no FROM pd_delivery_plans WHERE created_by = %s LIMIT 1",
-                                (operator_id,),
-                            )
-                        elif operator_name:
-                            cur.execute(
-                                "SELECT id, plan_no FROM pd_delivery_plans WHERE created_by_name = %s LIMIT 1",
-                                (operator_name,),
-                            )
-                        else:
-                            cur.execute(
-                                "SELECT id, plan_no FROM pd_delivery_plans WHERE created_by IS NULL AND created_by_name IS NULL LIMIT 1"
-                            )
-                        existed = cur.fetchone()
-                        if existed:
-                            existed_plan_no = existed.get("plan_no") if isinstance(existed, dict) else None
-                            conn.rollback()
-                            if existed_plan_no:
-                                return {
-                                    "success": False,
-                                    "error": f"当前用户已存在订货计划（计划编号：{existed_plan_no}），不能录入第二条",
-                                }
-                            return {"success": False, "error": "当前用户已存在订货计划，不能录入第二条"}
-
                         cur.execute(
                             """
                             INSERT INTO pd_delivery_plans (

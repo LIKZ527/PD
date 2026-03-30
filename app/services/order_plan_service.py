@@ -75,7 +75,7 @@ class OrderPlanService:
     ) -> Optional[Dict[str, Any]]:
         cur.execute(
             """
-            SELECT id, plan_no, smelter_name
+            SELECT id, plan_no, smelter_name, plan_status
             FROM pd_delivery_plans
             WHERE plan_no = %s
             LIMIT 1
@@ -166,9 +166,44 @@ class OrderPlanService:
                             "success": False,
                             "error": f"报货计划编号不存在: {plan_no}",
                         }
+                    dp_status = (dp.get("plan_status") or "生效中").strip()
+                    if dp_status != "生效中":
+                        return {
+                            "success": False,
+                            "error": "该报货计划已失效或未处于生效状态，无法录入订货计划",
+                        }
                     delivery_plan_id = int(dp["id"])
                     plan_no_db = (dp.get("plan_no") or plan_no).strip()
                     smelter = dp.get("smelter_name")
+
+                    if operator_id is not None:
+                        cur.execute(
+                            """
+                            SELECT id FROM pd_order_plans
+                            WHERE delivery_plan_id = %s AND created_by = %s
+                            LIMIT 1
+                            """,
+                            (delivery_plan_id, operator_id),
+                        )
+                    elif operator_name:
+                        cur.execute(
+                            """
+                            SELECT id FROM pd_order_plans
+                            WHERE delivery_plan_id = %s
+                              AND created_by IS NULL
+                              AND created_by_name = %s
+                            LIMIT 1
+                            """,
+                            (delivery_plan_id, operator_name),
+                        )
+                    else:
+                        cur.execute("SELECT 0 AS id WHERE 1=0")
+                    if cur.fetchone():
+                        return {
+                            "success": False,
+                            "error": "您在该报货计划下已有订货计划，每位大区经理同一报货计划仅限一条",
+                        }
+
                     limit_err = self._validate_truck_limit(
                         cur,
                         delivery_plan_id,

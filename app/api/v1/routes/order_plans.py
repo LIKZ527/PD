@@ -14,6 +14,9 @@ router = APIRouter(prefix="/order-plans", tags=["订货计划"])
 # 修改车数后仍保持原审核结论（通过或未通过）的角色；其他角色改车数后退回「待审核」
 _ORDER_PLAN_TRUCK_EDIT_KEEP_STATUS_ROLES = frozenset({"审核主管", "会计"})
 
+# 录入订货计划：大区经理每人每个报货计划一条；管理员可代录/运维
+_ORDER_PLAN_CREATE_ROLES = frozenset({"大区经理", "管理员"})
+
 
 def _operator_from_user(current_user: dict) -> tuple[Optional[int], Optional[str]]:
     uid = current_user.get("id")
@@ -23,6 +26,18 @@ def _operator_from_user(current_user: dict) -> tuple[Optional[int], Optional[str
         op_id = None
     op_name = current_user.get("name") or current_user.get("account")
     return op_id, op_name if op_name else None
+
+
+def require_regional_manager_for_order_plan_create(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    role = (current_user.get("role") or "").strip()
+    if role not in _ORDER_PLAN_CREATE_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="仅大区经理或管理员可录入订货计划",
+        )
+    return current_user
 
 
 class OrderPlanCreateRequest(BaseModel):
@@ -60,7 +75,7 @@ class OrderPlanAuditRequest(BaseModel):
 @router.post("/", summary="录入订货计划", response_model=dict)
 async def create_order_plan(
     request: OrderPlanCreateRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_regional_manager_for_order_plan_create),
     service: OrderPlanService = Depends(get_order_plan_service),
 ):
     op_id, op_name = _operator_from_user(current_user)
