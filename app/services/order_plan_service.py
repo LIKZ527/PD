@@ -9,6 +9,7 @@ from pymysql.cursors import DictCursor
 
 from app.services.contract_service import get_conn
 from app.services.delivery_plan_service import (
+    apply_adjust_confirmed_trucks,
     apply_increment_confirmed_trucks,
     get_delivery_plan_service,
 )
@@ -375,105 +376,150 @@ class OrderPlanService:
         _ensure_order_plan_remark_column()
         try:
             with get_conn() as conn:
-                with conn.cursor(DictCursor) as cur:
-                    cur.execute(
-                        "SELECT id, audit_status, delivery_plan_id FROM pd_order_plans WHERE id = %s",
-                        (order_plan_id,),
-                    )
-                    row = cur.fetchone()
-                    if not row:
-                        return {
-                            "success": False,
-                            "error": f"订货计划 ID {order_plan_id} 不存在",
-                        }
-
-                    current_status = row.get("audit_status")
-                    if current_status not in (
-                        AUDIT_STATUS_APPROVED,
-                        AUDIT_STATUS_REJECTED,
-                    ):
-                        return {
-                            "success": False,
-                            "error": "仅「审核通过」或「审核未通过」状态的订货计划可修改车数",
-                        }
-
-                    # 审核主管/会计：保持当前审核结论；其他角色：改后退回待审核
-                    if keep_audit_status:
-                        new_status = current_status
-                    else:
-                        new_status = AUDIT_STATUS_PENDING
-                    # 仅「待审核/审核通过」计入报货计划车数上限；保持「审核未通过」时不计入
-                    include_candidate = new_status in (
-                        AUDIT_STATUS_PENDING,
-                        AUDIT_STATUS_APPROVED,
-                    )
-                    delivery_plan_id = int(row.get("delivery_plan_id"))
-                    limit_err = self._validate_truck_limit(
-                        cur,
-                        delivery_plan_id,
-                        truck_count,
-                        include_candidate=include_candidate,
-                        exclude_order_plan_id=order_plan_id,
-                    )
-                    if limit_err:
-                        return {"success": False, "error": limit_err}
-
-                    if keep_audit_status:
+                prev_ac = conn.get_autocommit()
+                conn.autocommit(False)
+                try:
+                    with conn.cursor(DictCursor) as cur:
                         cur.execute(
                             """
-                            UPDATE pd_order_plans
-                            SET truck_count = %s,
-                                updated_by = %s,
-                                updated_by_name = %s
+                            SELECT id, audit_status, delivery_plan_id, truck_count, plan_no
+                            FROM pd_order_plans
                             WHERE id = %s
-                              AND audit_status = %s
+                            FOR UPDATE
                             """,
-                            (
-                                truck_count,
-                                operator_id,
-                                operator_name,
-                                order_plan_id,
-                                current_status,
-                            ),
+                            (order_plan_id,),
                         )
-                    else:
+                        row = cur.fetchone()
+                        if not row:
+                            conn.rollback()
+                            return {
+                                "success": False,
+                                "error": f"订货计划 ID {order_plan_id} 不存在",
+                            }
+
+                        current_status = row.get("audit_status")
+                        if current_status not in (
+                            AUDIT_STATUS_APPROVED,
+                            AUDIT_STATUS_REJECTED,
+                        ):
+                            conn.rollback()
+                            return {
+                                "success": False,
+                                "error": "仅「审核通过」或「审核未通过」状态的订货计划可修改车数",
+                            }
+
+                        old_truck_count = int(row.get("truck_count") or 0)
+                        plan_no_row = (row.get("plan_no") or "").strip()
+
+                        # 审核主管/会计：保持当前审核结论；其他角色：改后退回待审核
+                        if keep_audit_status:
+                            new_status = current_status
+                        else:
+                            new_status = AUDIT_STATUS_PENDING
+                        # 仅「待审核/审核通过」计入报货计划车数上限；保持「审核未通过」时不计入
+                        include_candidate = new_status in (
+                            AUDIT_STATUS_PENDING,
+                            AUDIT_STATUS_APPROVED,
+                        )
+                        delivery_plan_id = int(row.get("delivery_plan_id"))
+                        limit_err = self._validate_truck_limit(
+                            cur,
+                            delivery_plan_id,
+                            truck_count,
+                            include_candidate=include_candidate,
+                            exclude_order_plan_id=order_plan_id,
+                        )
+                        if limit_err:
+                            conn.rollback()
+                            return {"success": False, "error": limit_err}
+
+                        # 审核通过时已累加报货计划已定车数；改车数须同步，避免再次审核时重复累加
+                        delta_confirmed = 0
+                        if current_status == AUDIT_STATUS_APPROVED:
+                            if keep_audit_status:
+                                delta_confirmed = truck_count - old_truck_count
+                            else:
+                                delta_confirmed = -old_truck_count
+                        if delta_confirmed != 0:
+                            if not plan_no_row:
+                                conn.rollback()
+                                return {
+                                    "success": False,
+                                    "error": "订货计划缺少报货计划编号，无法同步已定车数",
+                                }
+                            try:
+                                apply_adjust_confirmed_trucks(
+                                    cur,
+                                    plan_no_row,
+                                    delta_confirmed,
+                                    operator_id=operator_id,
+                                    operator_name=operator_name,
+                                )
+                            except ValueError as e:
+                                conn.rollback()
+                                return {"success": False, "error": str(e)}
+
+                        if keep_audit_status:
+                            cur.execute(
+                                """
+                                UPDATE pd_order_plans
+                                SET truck_count = %s,
+                                    updated_by = %s,
+                                    updated_by_name = %s
+                                WHERE id = %s
+                                  AND audit_status = %s
+                                """,
+                                (
+                                    truck_count,
+                                    operator_id,
+                                    operator_name,
+                                    order_plan_id,
+                                    current_status,
+                                ),
+                            )
+                        else:
+                            cur.execute(
+                                """
+                                UPDATE pd_order_plans
+                                SET truck_count = %s,
+                                    audit_status = %s,
+                                    updated_by = %s,
+                                    updated_by_name = %s
+                                WHERE id = %s
+                                  AND audit_status = %s
+                                """,
+                                (
+                                    truck_count,
+                                    AUDIT_STATUS_PENDING,
+                                    operator_id,
+                                    operator_name,
+                                    order_plan_id,
+                                    current_status,
+                                ),
+                            )
+                        if cur.rowcount == 0:
+                            conn.rollback()
+                            return {
+                                "success": False,
+                                "error": "仅「审核通过」或「审核未通过」可修改车数，或数据已被他人更新，请刷新后重试",
+                            }
+
                         cur.execute(
-                            """
-                            UPDATE pd_order_plans
-                            SET truck_count = %s,
-                                audit_status = %s,
-                                updated_by = %s,
-                                updated_by_name = %s
-                            WHERE id = %s
-                              AND audit_status = %s
-                            """,
-                            (
-                                truck_count,
-                                AUDIT_STATUS_PENDING,
-                                operator_id,
-                                operator_name,
-                                order_plan_id,
-                                current_status,
-                            ),
+                            f"SELECT {self._SELECT.strip()} FROM pd_order_plans WHERE id = %s",
+                            (order_plan_id,),
                         )
-                    if cur.rowcount == 0:
-                        conn.rollback()
-                        return {
-                            "success": False,
-                            "error": "仅「审核通过」或「审核未通过」可修改车数，或数据已被他人更新，请刷新后重试",
-                        }
+                        out = cur.fetchone()
                     conn.commit()
-
-                    cur.execute(
-                        f"SELECT {self._SELECT.strip()} FROM pd_order_plans WHERE id = %s",
-                        (order_plan_id,),
-                    )
-                    out = cur.fetchone()
                     return {
                         "success": True,
                         "message": "车数已更新",
                         "data": _serialize_row(out) if out else {},
                     }
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.autocommit(prev_ac)
         except Exception as e:
             logger.error("update order plan truck_count failed: %s", e)
             return {"success": False, "error": str(e)}

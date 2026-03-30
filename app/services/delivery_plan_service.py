@@ -113,6 +113,39 @@ def apply_increment_confirmed_trucks(
     if cur.rowcount == 0:
         raise ValueError(f"报货计划编号不存在: {plan_no}")
     refresh_delivery_plan_status_if_full(cur, plan_no)
+    refresh_delivery_plan_status_if_room(cur, plan_no)
+
+
+def apply_adjust_confirmed_trucks(
+    cur,
+    plan_no: str,
+    delta: int,
+    *,
+    operator_id: Optional[int] = None,
+    operator_name: Optional[str] = None,
+) -> None:
+    """
+    在调用方事务内按增量调整报货计划已定/未定车数（delta 可为负）。
+    赋值顺序：先更新 confirmed_trucks，再据新值重算 unconfirmed_trucks（与单表 UPDATE 从左到右一致）。
+    """
+    if delta == 0:
+        return
+    _ensure_plan_audit_columns()
+    cur.execute(
+        """
+        UPDATE pd_delivery_plans
+        SET confirmed_trucks = GREATEST(0, confirmed_trucks + %s),
+            unconfirmed_trucks = GREATEST(0, planned_trucks - confirmed_trucks),
+            updated_by = %s,
+            updated_by_name = %s
+        WHERE plan_no = %s
+        """,
+        (delta, operator_id, operator_name, plan_no),
+    )
+    if cur.rowcount == 0:
+        raise ValueError(f"报货计划编号不存在: {plan_no}")
+    refresh_delivery_plan_status_if_full(cur, plan_no)
+    refresh_delivery_plan_status_if_room(cur, plan_no)
 
 
 def refresh_delivery_plan_status_if_full(cur, plan_no: str) -> None:
@@ -125,6 +158,21 @@ def refresh_delivery_plan_status_if_full(cur, plan_no: str) -> None:
           AND plan_status = '生效中'
           AND planned_trucks > 0
           AND confirmed_trucks >= planned_trucks
+        """,
+        (plan_no,),
+    )
+
+
+def refresh_delivery_plan_status_if_room(cur, plan_no: str) -> None:
+    """已定车数低于计划车数时，将因满额自动标记的「已失效」恢复为「生效中」（与满额失效对称）。"""
+    cur.execute(
+        """
+        UPDATE pd_delivery_plans
+        SET plan_status = '生效中'
+        WHERE plan_no = %s
+          AND plan_status = '已失效'
+          AND planned_trucks > 0
+          AND confirmed_trucks < planned_trucks
         """,
         (plan_no,),
     )
