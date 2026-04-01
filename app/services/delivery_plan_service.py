@@ -5,11 +5,17 @@ import logging
 import math
 import re
 from datetime import date, datetime
-from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from typing import Any, Dict, List, Optional, Tuple
+
+from pymysql.err import DataError
 
 # 与报单等业务一致：按每车 35 吨换算计划车数
 TONNAGE_PER_TRUCK = 35
+
+# 与库表 pd_delivery_plans.planned_tonnage DECIMAL(12,3) 一致；超出会触发 MySQL 1264
+MAX_PLANNED_TONNAGE = Decimal("999999999.999")
+_MAX_MYSQL_SIGNED_INT = 2147483647
 
 
 def planned_trucks_from_tonnage(tonnage: float) -> int:
@@ -18,6 +24,33 @@ def planned_trucks_from_tonnage(tonnage: float) -> int:
     if t <= 0:
         return 0
     return int(math.floor(t / TONNAGE_PER_TRUCK))
+
+
+def normalize_planned_tonnage_for_db(value: Any) -> Tuple[Optional[Decimal], Optional[str]]:
+    """
+    校验并规范化计划吨数，供写入 DECIMAL(12,3)。
+    返回 (量化后的 Decimal, 错误信息)；成功时错误信息为 None。
+    """
+    if value is None or value == "":
+        return Decimal("0.000"), None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None, "计划吨数必须为有效数字（不能为无穷或非数字）"
+    try:
+        d = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None, "计划吨数格式无效"
+    if not d.is_finite():
+        return None, "计划吨数必须为有效数字（不能为无穷或非数字）"
+    if d < 0:
+        return None, "计划吨数不能为负数"
+    d = d.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+    if d > MAX_PLANNED_TONNAGE:
+        return None, f"计划吨数超出允许范围（最大 {MAX_PLANNED_TONNAGE} 吨，与数据库 DECIMAL(12,3) 一致）"
+    trucks = planned_trucks_from_tonnage(float(d))
+    if trucks > _MAX_MYSQL_SIGNED_INT:
+        return None, "由吨数换算的计划车数超出系统上限，请减小计划吨数"
+    return d, None
+
 
 from pymysql.cursors import DictCursor
 
@@ -44,11 +77,15 @@ def _ensure_plan_audit_columns() -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                    SELECT COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
                     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pd_delivery_plans'
                     """
                 )
-                existing = {row[0] for row in (cur.fetchall() or [])}
+                rows = cur.fetchall() or []
+                existing = {row[0] for row in rows}
+                col_type_norm = {
+                    row[0]: (row[1] or "").lower().replace(" ", "") for row in rows
+                }
                 parts: list[str] = []
                 if "created_by" not in existing:
                     parts.append(
@@ -69,6 +106,10 @@ def _ensure_plan_audit_columns() -> None:
                 if "planned_tonnage" not in existing:
                     parts.append(
                         "ADD COLUMN planned_tonnage DECIMAL(12, 3) NOT NULL DEFAULT 0.000 COMMENT '计划吨数' AFTER planned_trucks"
+                    )
+                elif col_type_norm.get("planned_tonnage") != "decimal(12,3)":
+                    parts.append(
+                        "MODIFY COLUMN planned_tonnage DECIMAL(12, 3) NOT NULL DEFAULT 0.000 COMMENT '计划吨数'"
                     )
                 if parts:
                     cur.execute("ALTER TABLE pd_delivery_plans " + ", ".join(parts))
@@ -262,11 +303,18 @@ class DeliveryPlanService:
         except ValueError as e:
             return {"success": False, "error": str(e)}
 
-        planned_tonnage_v = float(data.get("planned_tonnage", 0) or 0)
+        planned_tonnage_dec, ton_err = normalize_planned_tonnage_for_db(
+            data.get("planned_tonnage", 0)
+        )
+        if ton_err:
+            return {"success": False, "error": ton_err}
+        planned_tonnage_v = planned_tonnage_dec
         if planned_tonnage_v > 0:
-            planned_trucks_v = planned_trucks_from_tonnage(planned_tonnage_v)
+            planned_trucks_v = planned_trucks_from_tonnage(float(planned_tonnage_v))
         else:
             planned_trucks_v = max(0, int(data.get("planned_trucks", 0) or 0))
+            if planned_trucks_v > _MAX_MYSQL_SIGNED_INT:
+                return {"success": False, "error": "计划车数超出系统上限"}
         confirmed_v = int(data.get("confirmed_trucks", 0) or 0)
         unconfirmed_v = max(0, planned_trucks_v - confirmed_v)
 
@@ -326,6 +374,19 @@ class DeliveryPlanService:
                 "message": "报货计划录入成功",
                 "data": out_data,
             }
+        except DataError as e:
+            err = str(e)
+            if getattr(e, "args", None) and e.args[0] == 1264 and "planned_tonnage" in err:
+                logger.warning("create delivery plan planned_tonnage out of range: %s", e)
+                return {
+                    "success": False,
+                    "error": (
+                        "计划吨数超出当前数据库列允许范围，或表结构不是 DECIMAL(12,3)。"
+                        "请核对录入的吨数，或联系管理员检查/迁移 pd_delivery_plans.planned_tonnage。"
+                    ),
+                }
+            logger.exception("create delivery plan failed: %s", e)
+            return {"success": False, "error": err}
         except Exception as e:
             err = str(e)
             if "Duplicate entry" in err and "uk_plan_no" in err:
@@ -520,8 +581,16 @@ class DeliveryPlanService:
                             return {"success": False, "error": f"报货计划 ID {plan_id} 不存在"}
 
                         if "planned_tonnage" in raw and raw["planned_tonnage"] is not None:
-                            pt = float(raw["planned_tonnage"])
-                            raw["planned_trucks"] = planned_trucks_from_tonnage(pt)
+                            pt_dec, pt_err = normalize_planned_tonnage_for_db(
+                                raw["planned_tonnage"]
+                            )
+                            if pt_err:
+                                conn.rollback()
+                                return {"success": False, "error": pt_err}
+                            raw["planned_tonnage"] = pt_dec
+                            raw["planned_trucks"] = planned_trucks_from_tonnage(
+                                float(pt_dec)
+                            )
                             cur.execute(
                                 "SELECT confirmed_trucks FROM pd_delivery_plans WHERE id = %s",
                                 (plan_id,),
@@ -588,6 +657,19 @@ class DeliveryPlanService:
                 detail = self.get_plan(plan_id)
                 out_data = detail.get("data") if detail.get("success") else {"id": plan_id}
                 return {"success": True, "message": "报货计划更新成功", "data": out_data}
+        except DataError as e:
+            err = str(e)
+            if getattr(e, "args", None) and e.args[0] == 1264 and "planned_tonnage" in err:
+                logger.warning("update delivery plan planned_tonnage out of range: %s", e)
+                return {
+                    "success": False,
+                    "error": (
+                        "计划吨数超出当前数据库列允许范围，或表结构不是 DECIMAL(12,3)。"
+                        "请核对录入的吨数，或联系管理员检查/迁移 pd_delivery_plans.planned_tonnage。"
+                    ),
+                }
+            logger.exception("update delivery plan failed: %s", e)
+            return {"success": False, "error": err}
         except Exception as e:
             err = str(e)
             if "Duplicate entry" in err and "uk_plan_no" in err:
