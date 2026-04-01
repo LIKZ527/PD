@@ -177,19 +177,19 @@ def _get_delivered_truck_count(contract_no: str, as_of_date: str = None) -> int:
 
 def get_warehouses() -> List[str]:
     """
-    从数据库读取所有仓库
+    从数据库读取所有仓库的大区经理
 
     返回:
-        仓库名称列表
+        大区经理列表
     """
     from app.services.contract_service import get_conn
 
-    warehouses = []
+    managers = []
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT warehouse_name
+                    SELECT COALESCE(regional_manager, warehouse_name) as manager
                     FROM pd_warehouses
                     WHERE is_active = 1 OR is_active IS NULL
                     ORDER BY warehouse_name
@@ -197,13 +197,12 @@ def get_warehouses() -> List[str]:
                 rows = cur.fetchall()
 
                 for row in rows:
-                    # 处理字典或元组
-                    warehouse_name = row['warehouse_name'] if isinstance(row, dict) else row[0]
-                    warehouses.append(warehouse_name)
+                    manager = row['manager'] if isinstance(row, dict) else row[0]
+                    managers.append(manager)
     except Exception as e:
         print(f"读取仓库数据失败: {e}")
 
-    return warehouses
+    return managers
 
 
 def get_warehouse_daily_capacity() -> Dict[str, int]:
@@ -231,6 +230,130 @@ def get_warehouse_daily_capacity() -> Dict[str, int]:
         }
 
     return daily_cap
+
+
+def save_predictions_to_db(plan: dict, prediction_date: str, is_test: bool = False):
+    """保存预测结果到数据库"""
+    from app.services.contract_service import get_conn
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM pd_allocation_predictions WHERE prediction_date = %s", (prediction_date,))
+
+            # 获取大区经理到仓库的映射
+            cur.execute("SELECT COALESCE(regional_manager, warehouse_name) as manager, warehouse_name FROM pd_warehouses")
+            manager_to_warehouse = {row[0]: row[1] for row in cur.fetchall()}
+
+            for manager, contracts in plan.items():
+                warehouse = manager_to_warehouse.get(manager, manager)
+                for contract_no, smelters in contracts.items():
+                    for smelter, dates in smelters.items():
+                        for date, truck_count in dates.items():
+                            cur.execute("""
+                                INSERT INTO pd_allocation_predictions
+                                (prediction_date, warehouse_name, regional_manager, contract_no,
+                                 smelter_company, delivery_date, truck_count, is_test)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (prediction_date, warehouse, manager, contract_no,
+                                  smelter, date, truck_count, 1 if is_test else 0))
+
+
+def get_predictions(regional_managers=None, smelters=None, contract_nos=None):
+    """查询预测结果"""
+    from app.services.contract_service import get_conn
+
+    filters = []
+    params = []
+
+    if regional_managers:
+        placeholders = ','.join(['%s'] * len(regional_managers))
+        filters.append(f"regional_manager IN ({placeholders})")
+        params.extend(regional_managers)
+
+    if smelters:
+        placeholders = ','.join(['%s'] * len(smelters))
+        filters.append(f"smelter_company IN ({placeholders})")
+        params.extend(smelters)
+
+    if contract_nos:
+        placeholders = ','.join(['%s'] * len(contract_nos))
+        filters.append(f"contract_no IN ({placeholders})")
+        params.extend(contract_nos)
+
+    where_clause = " AND ".join(filters) if filters else "1=1"
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(prediction_date) FROM pd_allocation_predictions")
+            latest_date = cur.fetchone()[0]
+
+            if not latest_date:
+                return {}, None, 0
+
+            query = f"""
+                SELECT regional_manager, contract_no, smelter_company,
+                       delivery_date, truck_count
+                FROM pd_allocation_predictions
+                WHERE prediction_date = %s AND {where_clause}
+                ORDER BY regional_manager, contract_no, delivery_date
+            """
+            cur.execute(query, [latest_date] + params)
+            rows = cur.fetchall()
+
+            predictions = {}
+            total_trucks = 0
+
+            for row in rows:
+                manager = row[0] or '未分配'
+                contract = row[1]
+                smelter = row[2]
+                date = str(row[3])
+                trucks = row[4]
+
+                if manager not in predictions:
+                    predictions[manager] = {}
+                if contract not in predictions[manager]:
+                    predictions[manager][contract] = {}
+                if smelter not in predictions[manager][contract]:
+                    predictions[manager][contract][smelter] = {}
+
+                predictions[manager][contract][smelter][date] = trucks
+                total_trucks += trucks
+
+            return predictions, str(latest_date), total_trucks
+
+
+def get_filter_options():
+    """获取筛选选项"""
+    from app.services.contract_service import get_conn
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT COALESCE(regional_manager, warehouse_name) as manager
+                FROM pd_warehouses
+                WHERE is_active = 1
+                ORDER BY manager
+            """)
+            managers = [row[0] for row in cur.fetchall()]
+
+            cur.execute("""
+                SELECT DISTINCT smelter_company
+                FROM pd_contracts
+                WHERE status = '生效中'
+                ORDER BY smelter_company
+            """)
+            smelters = [row[0] for row in cur.fetchall()]
+
+            cur.execute("""
+                SELECT DISTINCT contract_no
+                FROM pd_contracts
+                WHERE status = '生效中'
+                ORDER BY contract_no
+            """)
+            contracts = [row[0] for row in cur.fetchall()]
+
+            return managers, smelters, contracts
 
 
 # ─────────────────────────────────────────────────────────

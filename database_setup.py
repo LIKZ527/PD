@@ -338,6 +338,7 @@ TABLE_STATEMENTS = [
 	CREATE TABLE IF NOT EXISTS pd_warehouses (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
 		warehouse_name VARCHAR(64) NOT NULL UNIQUE COMMENT '库房名称',
+		regional_manager VARCHAR(64) COMMENT '大区经理',
 		public_account VARCHAR(32) COMMENT '对公账号',
 		is_active TINYINT DEFAULT 1 COMMENT '是否启用：1=启用，0=停用',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -345,6 +346,24 @@ TABLE_STATEMENTS = [
 		INDEX idx_warehouse_name (warehouse_name),
 		INDEX idx_is_active (is_active)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='库房表';
+	""",
+	"""
+	CREATE TABLE IF NOT EXISTS pd_allocation_predictions (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+		prediction_date DATE NOT NULL COMMENT '预测日期',
+		warehouse_name VARCHAR(64) NOT NULL COMMENT '仓库名称',
+		regional_manager VARCHAR(64) COMMENT '大区经理',
+		contract_no VARCHAR(64) NOT NULL COMMENT '合同编号',
+		smelter_company VARCHAR(128) NOT NULL COMMENT '冶炼厂',
+		delivery_date DATE NOT NULL COMMENT '发货日期',
+		truck_count INT NOT NULL COMMENT '车数',
+		is_test TINYINT DEFAULT 0 COMMENT '是否测试数据',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+		INDEX idx_prediction_date (prediction_date),
+		INDEX idx_regional_manager (regional_manager),
+		INDEX idx_smelter (smelter_company),
+		INDEX idx_contract (contract_no)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分配预测结果表';
 	""",
 	"""
 	CREATE TABLE IF NOT EXISTS pd_payees (

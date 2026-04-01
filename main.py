@@ -36,6 +36,7 @@ from app.core.config import settings
 from app.api.v1.user.routes import register_pd_auth_routes
 from core.auth import get_user_identity_from_authorization
 from app.services.contract_service import expire_contracts_after_grace
+from app.api.v1.routes.allocation import run_test_prediction, run_daily_prediction
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -49,8 +50,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"数据库初始化失败: {e}")
         logger.exception("database init failed")
+
     expired_count = expire_contracts_after_grace()
     logger.info("contract expire sync finished updated=%s", expired_count)
+
+    # 首次启动执行测试预测
+    try:
+        run_test_prediction(num_contracts=5, H=10)
+        logger.info("test prediction completed on startup")
+    except Exception as e:
+        logger.error("test prediction failed: %s", e)
+
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(
         func=expire_contracts_after_grace,
@@ -59,8 +69,24 @@ async def lifespan(app: FastAPI):
         id="expire_contracts",
         replace_existing=True,
     )
+    # # 添加每日预测任务（凌晨1点执行）
+    # scheduler.add_job(
+    #     func=run_daily_prediction,
+    #     trigger=CronTrigger(hour=1, minute=0),
+    #     kwargs={"H": 10},
+    #     id="daily_prediction",
+    #     replace_existing=True,
+    # )
+        # 添加每日测试预测任务（凌晨1点执行）
+    scheduler.add_job(
+        func=run_test_prediction,
+        trigger=CronTrigger(hour=1, minute=0),
+        kwargs={"num_contracts": 5, "H": 10},
+        id="daily_prediction",
+        replace_existing=True,
+    )
     scheduler.start()
-    logger.info("contract expire scheduler started")
+    logger.info("scheduler started")
     yield
     scheduler.shutdown(wait=False)
     print("应用关闭")
