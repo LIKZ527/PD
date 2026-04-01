@@ -527,3 +527,63 @@ async def get_active_contracts_list():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取合同列表失败: {str(e)}")
+
+
+@router.post("/test_plan")
+async def test_plan(
+    num_contracts: int = Query(3, ge=1, le=10, description="测试合同数量"),
+    H: int = Query(7, ge=1, le=30, description="规划窗口天数")
+):
+    """
+    测试完整流程: 插入测试数据 + 生成调度计划
+
+    自动执行:
+    1. 清理旧的TESTPLAN测试数据
+    2. 插入新的测试合同
+    3. 生成调度计划
+    """
+    try:
+        prefix = "TESTPLAN"
+
+        # 1. 清理旧数据
+        _cleanup_test_data(prefix=prefix)
+
+        # 2. 设置仓库
+        _setup_warehouses()
+
+        # 3. 插入测试合同
+        contracts = _insert_test_contracts(num_contracts=num_contracts, prefix=prefix)
+
+        # 4. 生成调度计划
+        window_start = datetime.now().strftime("%Y-%m-%d")
+        contracts_data = get_active_contracts(as_of_date=window_start)
+        warehouses = get_warehouses()
+        daily_cap = get_warehouse_daily_capacity()
+        window_end = (datetime.now() + timedelta(days=H - 1)).strftime("%Y-%m-%d")
+
+        plan, status = solve_dispatch_plan(
+            contracts=contracts_data,
+            warehouses=warehouses,
+            daily_cap=daily_cap,
+            window_start=window_start,
+            window_end=window_end,
+            solver_msg=False
+        )
+
+        return {
+            "success": True,
+            "message": f"测试完成: 创建{len(contracts)}个合同并生成{H}天调度计划",
+            "test_data": {
+                "inserted_contracts": len(contracts),
+                "contract_prefix": prefix
+            },
+            "plan": plan,
+            "meta": {
+                "solver_status": status,
+                "window_start": window_start,
+                "window_end": window_end,
+                "H": H
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"测试流程失败: {str(e)}")
