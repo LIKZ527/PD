@@ -2,6 +2,7 @@
 分配规划路由
 支持生成调度计划、查看优化结果、测试数据管理
 """
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Optional
 import random
@@ -25,6 +26,7 @@ from app.services.contract_service import get_conn
 
 
 router = APIRouter(prefix="/allocation", tags=["分配规划"])
+logger = logging.getLogger(__name__)
 
 
 # ============ 响应模型 ============
@@ -396,6 +398,67 @@ def _cleanup_test_data(prefix: str = "TEST") -> dict:
 def _save_predictions_to_db(plan: dict, prediction_date: str, is_test: bool = False):
     """保存预测结果到数据库"""
     save_predictions_to_db(plan, prediction_date, is_test)
+
+
+def _run_dispatch_and_save(
+    window_start: str,
+    H: int,
+    *,
+    as_of_date: str,
+    is_test: bool,
+) -> tuple[bool, str]:
+    """求解排产并写入 pd_allocation_predictions；返回 (是否成功, 说明)。"""
+    contracts = get_active_contracts(as_of_date=as_of_date)
+    if not contracts:
+        return False, "no active contracts"
+    warehouses = get_warehouses()
+    if not warehouses:
+        return False, "no warehouses"
+    daily_cap = get_warehouse_daily_capacity()
+    window_end = (
+        datetime.strptime(window_start, "%Y-%m-%d") + timedelta(days=H - 1)
+    ).strftime("%Y-%m-%d")
+    plan, status = solve_dispatch_plan(
+        contracts=contracts,
+        warehouses=warehouses,
+        daily_cap=daily_cap,
+        window_start=window_start,
+        window_end=window_end,
+        solver_msg=False,
+    )
+    if status not in ("Optimal", "Feasible"):
+        return False, f"solver status={status}"
+    _save_predictions_to_db(plan, window_start, is_test=is_test)
+    return True, "ok"
+
+
+def run_daily_prediction(H: int = 10) -> None:
+    """供 APScheduler 调用：按当日窗口生成正式预测并入库（与 GET /plan 核心逻辑一致）。"""
+    window_start = datetime.now().strftime("%Y-%m-%d")
+    ok, msg = _run_dispatch_and_save(
+        window_start, H, as_of_date=window_start, is_test=False
+    )
+    if not ok:
+        logger.warning("run_daily_prediction skipped: %s", msg)
+
+
+def run_test_prediction(num_contracts: int = 5, H: int = 10) -> None:
+    """供 lifespan / 定时任务调用：写入测试合同与关联数据后生成测试预测（is_test）。"""
+    try:
+        _setup_warehouses()
+        contracts = _insert_test_contracts(num_contracts=num_contracts, prefix="TEST")
+        _insert_test_deliveries(contracts=contracts, max_per_contract=2)
+        _insert_test_weighbills(contracts=contracts, max_per_contract=1)
+    except Exception:
+        logger.exception("run_test_prediction: test data setup failed")
+        return
+    window_start = datetime.now().strftime("%Y-%m-%d")
+    ok, msg = _run_dispatch_and_save(
+        window_start, H, as_of_date=window_start, is_test=True
+    )
+    if not ok:
+        logger.warning("run_test_prediction skipped: %s", msg)
+
 
 @router.post(
     "/test-data/setup",
