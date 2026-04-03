@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.routes import (
     agent_chat,
     allocation,
+    t1_compat,
     balances,
     contracts,
     customers,
@@ -32,3 +33,4 @@ api_router.include_router(product_categories.router, tags=["品类管理"])
 api_router.include_router(exception_types.router, tags=["异常审核"])
 api_router.include_router(exception_reports.router, tags=["异常审核"])
 api_router.include_router(allocation.router, tags=["分配规划"])
+api_router.include_router(t1_compat.router)

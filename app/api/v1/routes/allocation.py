@@ -3,12 +3,12 @@
 支持生成调度计划、查看优化结果、测试数据管理
 """
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 import random
 from decimal import Decimal
 
-from fastapi import APIRouter, HTTPException, Query, Body
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, HTTPException, Query, Body, Depends
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.services.allocation_service import (
     compute_manager_daily_allocation,
@@ -18,7 +18,9 @@ from app.services.allocation_service import (
     solve_dispatch_plan,
     save_predictions_to_db,
     get_filter_options,
+    query_ai_purchase_quantity,
 )
+from core.auth import get_current_user
 from app.services.contract_service import get_conn
 
 
@@ -153,6 +155,62 @@ class ActiveContractsListResponse(BaseModel):
     success: bool = Field(True, description="是否成功")
     contracts: list[ActiveContractItemResponse] = Field(..., description="合同列表")
     count: int = Field(..., description="合同条数")
+
+
+class PurchaseQuantityQueryRequest(BaseModel):
+    """AI 预测报货数量：统一查询请求体。"""
+
+    model_config = ConfigDict(title="AI预测报货查询请求")
+
+    start_date: str = Field(..., description="规划/展示起始日 YYYY-MM-DD")
+    end_date: str = Field(..., description="规划/展示结束日 YYYY-MM-DD，须 ≥ start_date")
+    warehouse: Optional[str] = Field(None, description="仓库名称；空表示全部")
+    contract_no: Optional[str] = Field(None, description="合同编号，后端按子串模糊匹配；空表示不筛")
+    smelter: Optional[str] = Field(None, description="冶炼厂关键字（如 金利、豫光）；空表示全部")
+
+    @field_validator("start_date", "end_date", mode="before")
+    @classmethod
+    def strip_dates(cls, v: object) -> object:
+        if isinstance(v, str):
+            return v.strip()
+        return v
+
+    @field_validator("warehouse", "contract_no", "smelter", mode="before")
+    @classmethod
+    def empty_filter_to_none(cls, v: object) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v.strip() if isinstance(v, str) else str(v)
+
+
+class PurchaseQuantityDataPayload(BaseModel):
+    """统一查询返回的 data 字段。"""
+
+    model_config = ConfigDict(title="AI预测报货查询数据")
+
+    warehouse_options: list[str] = Field(
+        default_factory=list,
+        description="仓库名称列表，供「大区经理（仓库）」下拉",
+    )
+    plan: dict[str, Any] = Field(
+        default_factory=dict,
+        description="仓库 → 合同编号 → 冶炼厂 → 日期 → 预测车数",
+    )
+
+
+class PurchaseQuantityQueryEnvelope(BaseModel):
+    """统一查询 HTTP 响应包络。"""
+
+    model_config = ConfigDict(title="AI预测报货查询响应")
+
+    success: bool = Field(..., description="是否成功")
+    message: str = Field("", description="失败时的说明；成功时可为空字符串")
+    data: Optional[PurchaseQuantityDataPayload] = Field(
+        None,
+        description="成功时的表格数据；失败时为 null",
+    )
 
 
 # ============ 辅助函数 ============
@@ -629,6 +687,41 @@ async def get_warehouse_capacity():
         return WarehouseCapacityResponse(success=True, daily_capacity=capacity)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取仓库产能失败: {str(e)}")
+
+
+@router.post(
+    "/purchase-quantity/query",
+    summary="AI 预测报货数量：统一查询",
+    response_description="校验参数、服务端筛选，返回下拉仓库列表与四层嵌套 plan",
+    response_model=PurchaseQuantityQueryEnvelope,
+)
+async def post_purchase_quantity_query(
+    body: PurchaseQuantityQueryRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    一次请求返回 `warehouse_options` 与 `plan`（仓库→合同→冶炼厂→日期→车数），
+    数据来自最近一次写入的 `pd_allocation_predictions`，按 `delivery_date` 落在请求区间内筛选。
+    """
+    raw = query_ai_purchase_quantity(
+        body.start_date,
+        body.end_date,
+        warehouse=body.warehouse,
+        contract_no=body.contract_no,
+        smelter=body.smelter,
+    )
+    if raw.get("success") and raw.get("data") is not None:
+        payload = PurchaseQuantityDataPayload(**raw["data"])
+        return PurchaseQuantityQueryEnvelope(
+            success=True,
+            message=raw.get("message") or "",
+            data=payload,
+        )
+    return PurchaseQuantityQueryEnvelope(
+        success=False,
+        message=raw.get("message") or "查询失败",
+        data=None,
+    )
 
 
 @router.get(

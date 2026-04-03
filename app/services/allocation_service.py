@@ -357,6 +357,196 @@ def get_filter_options():
             return managers, smelters, contracts
 
 
+def get_active_warehouse_names() -> List[str]:
+    """启用仓库的 `warehouse_name` 列表（下拉与 plan 第一层 key）。"""
+    from app.services.contract_service import get_conn
+
+    names: List[str] = []
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT warehouse_name
+                    FROM pd_warehouses
+                    WHERE is_active = 1 OR is_active IS NULL
+                    ORDER BY warehouse_name
+                    """
+                )
+                for row in cur.fetchall() or []:
+                    wn = row["warehouse_name"] if isinstance(row, dict) else row[0]
+                    if wn:
+                        names.append(str(wn))
+    except Exception as e:
+        print(f"读取仓库名称列表失败: {e}")
+    return names
+
+
+def get_warehouse_names_by_ids(warehouse_ids: List[int]) -> List[str]:
+    """按主键解析 `pd_warehouses.warehouse_name`，仅包含存在的 id。"""
+    ids = [i for i in warehouse_ids if isinstance(i, int) and i > 0]
+    if not ids:
+        return []
+    from app.services.contract_service import get_conn
+
+    placeholders = ",".join(["%s"] * len(ids))
+    names: List[str] = []
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT warehouse_name
+                    FROM pd_warehouses
+                    WHERE id IN ({placeholders})
+                    ORDER BY warehouse_name
+                    """,
+                    ids,
+                )
+                for row in cur.fetchall() or []:
+                    wn = row["warehouse_name"] if isinstance(row, dict) else row[0]
+                    if wn:
+                        names.append(str(wn))
+    except Exception as e:
+        print(f"按 id 解析仓库名称失败: {e}")
+    return names
+
+
+def query_ai_purchase_quantity(
+    start_date: str,
+    end_date: str,
+    *,
+    warehouse: Optional[str] = None,
+    warehouse_names: Optional[List[str]] = None,
+    contract_no: Optional[str] = None,
+    smelter: Optional[str] = None,
+    max_days: int = 30,
+) -> Dict[str, Any]:
+    """
+    统一查询：仓库下拉选项 + 预测 plan（仓库→合同→冶炼厂→日期→车数）。
+    使用 `pd_allocation_predictions` 中最近一次 `prediction_date` 的全量快照，
+    再按 `delivery_date` 落在 [start_date, end_date] 内筛选。
+    """
+    from app.services.contract_service import get_conn
+
+    def _fail(msg: str) -> Dict[str, Any]:
+        return {"success": False, "message": msg, "data": None}
+
+    warehouse_options = get_active_warehouse_names()
+
+    sd = (start_date or "").strip()
+    ed = (end_date or "").strip()
+    if not sd or not ed:
+        return _fail("start_date 与 end_date 均为必填")
+
+    try:
+        d_start = datetime.strptime(sd, "%Y-%m-%d").date()
+        d_end = datetime.strptime(ed, "%Y-%m-%d").date()
+    except ValueError:
+        return _fail("日期格式须为 YYYY-MM-DD")
+
+    if d_end < d_start:
+        return _fail("end_date 不能早于 start_date")
+
+    if (d_end - d_start).days + 1 > max_days:
+        return _fail(f"查询区间不能超过 {max_days} 天")
+
+    wh_filter = (warehouse or "").strip() or None
+    wh_list = [w.strip() for w in (warehouse_names or []) if w and str(w).strip()]
+    cn_filter = (contract_no or "").strip() or None
+    sm_filter = (smelter or "").strip() or None
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(prediction_date) FROM pd_allocation_predictions")
+                row = cur.fetchone()
+                latest_pd = row[0] if row else None
+    except Exception as e:
+        return _fail(f"查询预测数据失败: {e}")
+
+    if not latest_pd:
+        return {
+            "success": True,
+            "message": "暂无预测数据，请先生成调度分配计划",
+            "data": {
+                "warehouse_options": warehouse_options,
+                "plan": {},
+            },
+        }
+
+    if hasattr(latest_pd, "strftime"):
+        latest_pd_str = latest_pd.strftime("%Y-%m-%d")
+    else:
+        latest_pd_str = str(latest_pd)[:10]
+
+    conditions = [
+        "prediction_date = %s",
+        "delivery_date >= %s",
+        "delivery_date <= %s",
+    ]
+    params: List[Any] = [latest_pd_str, sd, ed]
+
+    if wh_list:
+        ph = ",".join(["%s"] * len(wh_list))
+        conditions.append(f"warehouse_name IN ({ph})")
+        params.extend(wh_list)
+    elif wh_filter:
+        conditions.append("warehouse_name = %s")
+        params.append(wh_filter)
+    if cn_filter:
+        conditions.append("contract_no LIKE %s")
+        params.append(f"%{cn_filter}%")
+    if sm_filter:
+        conditions.append("smelter_company LIKE %s")
+        params.append(f"%{sm_filter}%")
+
+    wh_expr = "COALESCE(NULLIF(TRIM(warehouse_name), ''), regional_manager, '未分配')"
+
+    sql = f"""
+        SELECT
+            {wh_expr} AS wh,
+            contract_no,
+            smelter_company,
+            DATE(delivery_date) AS dday,
+            SUM(truck_count) AS tc
+        FROM pd_allocation_predictions
+        WHERE {' AND '.join(conditions)}
+        GROUP BY {wh_expr}, contract_no, smelter_company, DATE(delivery_date)
+        ORDER BY wh, contract_no, smelter_company, dday
+    """
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall() or []
+    except Exception as e:
+        return _fail(f"查询预测明细失败: {e}")
+
+    plan: Dict[str, Any] = {}
+    for row in rows:
+        w_h = row[0]
+        c_n = row[1]
+        s_m = row[2]
+        d_day = row[3]
+        t_c = row[4]
+        if hasattr(d_day, "strftime"):
+            d_str = d_day.strftime("%Y-%m-%d")
+        else:
+            d_str = str(d_day)[:10]
+        plan.setdefault(w_h, {}).setdefault(c_n, {}).setdefault(s_m, {})[d_str] = int(t_c or 0)
+
+    return {
+        "success": True,
+        "message": "",
+        "data": {
+            "warehouse_options": warehouse_options,
+            "plan": plan,
+        },
+    }
+
+
 # ─────────────────────────────────────────────────────────
 # 数据结构
 # ─────────────────────────────────────────────────────────
