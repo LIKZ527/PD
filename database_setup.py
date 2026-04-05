@@ -713,6 +713,48 @@ def ensure_weighbill_audit_columns():
 		connection.close()
 
 
+def ensure_pd_weighbills_upload_status_column():
+	"""旧库补全 pd_weighbills.upload_status（分配测试数据等 INSERT 依赖）"""
+	config = get_mysql_config()
+	connection = pymysql.connect(**config)
+	try:
+		with connection.cursor() as cursor:
+			cursor.execute("SHOW TABLES LIKE 'pd_weighbills'")
+			if cursor.fetchone() is None:
+				return
+			cursor.execute("SHOW COLUMNS FROM pd_weighbills LIKE 'upload_status'")
+			if cursor.fetchone() is not None:
+				return
+			cursor.execute("SHOW COLUMNS FROM pd_weighbills LIKE 'total_amount'")
+			if cursor.fetchone() is not None:
+				cursor.execute("""
+					ALTER TABLE pd_weighbills
+					ADD COLUMN upload_status ENUM('已上传', '待上传') DEFAULT '待上传'
+					COMMENT '磅单上传状态'
+					AFTER total_amount
+				""")
+			else:
+				cursor.execute("""
+					ALTER TABLE pd_weighbills
+					ADD COLUMN upload_status ENUM('已上传', '待上传') DEFAULT '待上传'
+					COMMENT '磅单上传状态'
+				""")
+			print("pd_weighbills 已添加 upload_status 列")
+			cursor.execute(
+				"SHOW INDEX FROM pd_weighbills WHERE Key_name = 'idx_upload_status'"
+			)
+			if cursor.fetchone() is None:
+				try:
+					cursor.execute(
+						"ALTER TABLE pd_weighbills ADD INDEX idx_upload_status (upload_status)"
+					)
+				except Exception:
+					pass
+		connection.commit()
+	finally:
+		connection.close()
+
+
 def ensure_pd_user_permissions_columns():
 	"""旧库补全 pd_user_permissions 中新增的权限列（CREATE IF NOT EXISTS 不会修改已有表）"""
 	config = get_mysql_config()
@@ -785,6 +827,61 @@ def ensure_pd_delivery_plans_tonnage_column():
 		connection.close()
 
 
+def ensure_pd_warehouses_regional_manager_column():
+	"""旧库补全 pd_warehouses.regional_manager（分配预测 / 测试数据依赖）"""
+	config = get_mysql_config()
+	connection = pymysql.connect(**config)
+	try:
+		with connection.cursor() as cursor:
+			cursor.execute("SHOW TABLES LIKE 'pd_warehouses'")
+			if cursor.fetchone() is None:
+				return
+			cursor.execute("SHOW COLUMNS FROM pd_warehouses LIKE 'regional_manager'")
+			if cursor.fetchone() is None:
+				cursor.execute("""
+					ALTER TABLE pd_warehouses
+					ADD COLUMN regional_manager VARCHAR(64) NULL COMMENT '大区经理'
+					AFTER warehouse_name
+				""")
+				print("pd_warehouses 已添加 regional_manager 列")
+		connection.commit()
+	finally:
+		connection.close()
+
+
+def ensure_pd_allocation_predictions_regional_manager_column():
+	"""旧库补全 pd_allocation_predictions.regional_manager"""
+	config = get_mysql_config()
+	connection = pymysql.connect(**config)
+	try:
+		with connection.cursor() as cursor:
+			cursor.execute("SHOW TABLES LIKE 'pd_allocation_predictions'")
+			if cursor.fetchone() is None:
+				return
+			cursor.execute("SHOW COLUMNS FROM pd_allocation_predictions LIKE 'regional_manager'")
+			if cursor.fetchone() is None:
+				cursor.execute("""
+					ALTER TABLE pd_allocation_predictions
+					ADD COLUMN regional_manager VARCHAR(64) NULL COMMENT '大区经理'
+					AFTER warehouse_name
+				""")
+				print("pd_allocation_predictions 已添加 regional_manager 列")
+			cursor.execute(
+				"SHOW INDEX FROM pd_allocation_predictions WHERE Key_name = 'idx_regional_manager'"
+			)
+			if cursor.fetchone() is None:
+				try:
+					cursor.execute(
+						"ALTER TABLE pd_allocation_predictions "
+						"ADD INDEX idx_regional_manager (regional_manager)"
+					)
+				except Exception:
+					pass
+		connection.commit()
+	finally:
+		connection.close()
+
+
 def migrate_delivery_status_to_audit():
 	"""迁移报单状态：待确认/已确认/已完成/已取消 -> 审核通过/审核未通过"""
 	config = get_mysql_config()
@@ -822,8 +919,11 @@ def create_tables() -> None:
 		print("所有数据表创建完成")
 		init_permission_definitions()
 		ensure_weighbill_audit_columns()
+		ensure_pd_weighbills_upload_status_column()
 		ensure_pd_user_permissions_columns()
 		ensure_pd_delivery_plans_tonnage_column()
+		ensure_pd_warehouses_regional_manager_column()
+		ensure_pd_allocation_predictions_regional_manager_column()
 		migrate_delivery_status_to_audit()
 	finally:
 		connection.close()

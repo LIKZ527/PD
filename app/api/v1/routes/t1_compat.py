@@ -5,8 +5,9 @@
 POST /allocation/purchase-quantity/query 同源逻辑）。
 """
 from datetime import datetime, timedelta
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.allocation_service import (
@@ -35,12 +36,12 @@ class GetPurchaseSuggestionRequest(BaseModel):
 
     warehouse_ids: list[int] = Field(default_factory=list)
     demands: list[_PurchaseSuggestionDemandItem] = Field(default_factory=list)
-    price_type: str | None = Field(None, description="旧字段，忽略")
-    start_date: str | None = Field(
+    price_type: Optional[str] = Field(None, description="旧字段，忽略")
+    start_date: Optional[str] = Field(
         None,
         description="可选；不传则默认当天起连续 7 天（含首尾）",
     )
-    end_date: str | None = Field(None, description="可选；须与 start_date 同传")
+    end_date: Optional[str] = Field(None, description="可选；须与 start_date 同传")
 
 
 @router.post(
@@ -87,8 +88,8 @@ async def get_purchase_suggestion(
             message=raw.get("message") or "",
             data=payload,
         )
-    status_code = int(raw.get("status_code") or 500)
-    raise HTTPException(
-        status_code=status_code,
-        detail=raw.get("message") or "查询失败",
+    return PurchaseQuantityQueryEnvelope(
+        success=False,
+        message=raw.get("message") or "查询失败",
+        data=None,
     )

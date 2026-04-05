@@ -3,6 +3,7 @@
 支持生成调度计划、查看优化结果、测试数据管理
 """
 import logging
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
 import random
@@ -188,30 +189,82 @@ class PurchaseQuantityQueryRequest(BaseModel):
 
 
 class PurchaseQuantityDataPayload(BaseModel):
-    """统一查询返回的 data 字段。"""
+    """统一查询返回的 data 字段：warehouse_options + 四层嵌套 plan。"""
 
-    model_config = ConfigDict(title="AI预测报货查询数据")
+    model_config = ConfigDict(
+        title="AI预测报货查询数据",
+        json_schema_extra={
+            "example": {
+                "warehouse_options": ["山东仓库", "山西仓库", "666"],
+                "plan": {
+                    "山东仓库": {
+                        "HT-2026-001": {
+                            "金利": {
+                                "2026-04-05": 2,
+                                "2026-04-06": 1,
+                                "2026-04-07": 0,
+                            }
+                        },
+                        "HT-2026-002": {
+                            "豫光": {"2026-04-05": 3, "2026-04-06": 2}
+                        },
+                    },
+                    "山西仓库": {
+                        "HT-2026-010": {"株冶": {"2026-04-05": 1}}
+                    },
+                },
+            }
+        },
+    )
 
     warehouse_options: list[str] = Field(
         default_factory=list,
         description="仓库名称列表，供「大区经理（仓库）」下拉",
     )
-    plan: dict[str, Any] = Field(
+    plan: dict[str, dict[str, dict[str, dict[str, int]]]] = Field(
         default_factory=dict,
-        description="仓库 → 合同编号 → 冶炼厂 → 日期 → 预测车数",
+        description="仓库 → 合同编号 → 冶炼厂 → 日期(YYYY-MM-DD) → 预测车数；区间内无数据日为 0",
     )
 
 
 class PurchaseQuantityQueryEnvelope(BaseModel):
-    """统一查询 HTTP 响应包络。"""
+    """统一查询 HTTP 响应：{ success, message, data }；失败时 data 为 null。"""
 
-    model_config = ConfigDict(title="AI预测报货查询响应")
+    model_config = ConfigDict(
+        title="AI预测报货查询响应",
+        json_schema_extra={
+            "example": {
+                "success": True,
+                "message": "",
+                "data": {
+                    "warehouse_options": ["山东仓库", "山西仓库", "666"],
+                    "plan": {
+                        "山东仓库": {
+                            "HT-2026-001": {
+                                "金利": {
+                                    "2026-04-05": 2,
+                                    "2026-04-06": 1,
+                                    "2026-04-07": 0,
+                                }
+                            },
+                            "HT-2026-002": {
+                                "豫光": {"2026-04-05": 3, "2026-04-06": 2}
+                            },
+                        },
+                        "山西仓库": {
+                            "HT-2026-010": {"株冶": {"2026-04-05": 1}}
+                        },
+                    },
+                },
+            }
+        },
+    )
 
     success: bool = Field(..., description="是否成功")
     message: str = Field("", description="失败时的说明；成功时可为空字符串")
     data: Optional[PurchaseQuantityDataPayload] = Field(
         None,
-        description="成功时的表格数据；失败时为 null",
+        description="成功且可查时为 warehouse_options 与 plan；失败或无数据时为 null",
     )
 
 
@@ -256,11 +309,13 @@ def _insert_test_contracts(num_contracts: int, prefix: str) -> list:
     products = ["电动车", "黑皮", "新能源", "通信", "摩托车"]
 
     inserted = []
+    day_stamp = datetime.now().strftime("%Y%m%d")
+    run_token = uuid.uuid4().hex[:8]
 
     with _get_db_conn() as conn:
         with conn.cursor() as cur:
             for i in range(num_contracts):
-                contract_no = f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{i+1:03d}"
+                contract_no = f"{prefix}_{day_stamp}_{run_token}_{i+1:03d}"
                 smelter = random.choice(smelters)
                 contract_date = (datetime.now() - timedelta(days=random.randint(0, 1))).date()
                 end_date = contract_date + timedelta(days=random.randint(5, 10))
@@ -763,9 +818,11 @@ async def post_purchase_quantity_query(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    一次请求返回 `warehouse_options` 与 `plan`（仓库→合同→冶炼厂→日期→车数），
-    数据来自最近一次写入的 `pd_allocation_predictions`，按 `delivery_date` 落在请求区间内筛选。
-    大区经理：`warehouse_options` 与数据范围与 `pd_warehouses.regional_manager` 绑定；筛选仓库须为本人可见库。
+    统一 JSON：`{ "success", "message", "data" }`；`data` 含 `warehouse_options` 与四层嵌套 `plan`
+    （仓库→合同→冶炼厂→日期→车数）。数据来自最近一次 `pd_allocation_predictions` 快照，
+    按 `delivery_date` 落在 [start_date, end_date] 筛选；区间内每个日期均有键，无预测为 0。
+    失败时 `success` 为 false、`data` 为 null，HTTP 仍为 200（与 `/t1/get_purchase_suggestion` 一致）。
+    大区经理：`warehouse_options` 与行级范围与 `pd_warehouses.regional_manager` 绑定；筛选仓库须为本人可见库。
     """
     raw = query_ai_purchase_quantity(
         body.start_date,
@@ -782,10 +839,10 @@ async def post_purchase_quantity_query(
             message=raw.get("message") or "",
             data=payload,
         )
-    status_code = int(raw.get("status_code") or 500)
-    raise HTTPException(
-        status_code=status_code,
-        detail=raw.get("message") or "查询失败",
+    return PurchaseQuantityQueryEnvelope(
+        success=False,
+        message=raw.get("message") or "查询失败",
+        data=None,
     )
 
 

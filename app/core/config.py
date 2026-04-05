@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -25,10 +26,10 @@ class Settings(BaseModel):
     jwt_secret: str
     jwt_algorithm: str
     db_url: str
-    coze_stream_url: str | None = None
-    coze_project_id: str | None = None
-    coze_session_id: str | None = None
-    coze_bearer_token: str | None = None
+    coze_stream_url: Optional[str] = None
+    coze_project_id: Optional[str] = None
+    coze_session_id: Optional[str] = None
+    coze_bearer_token: Optional[str] = None
 
 
 settings = load_settings()

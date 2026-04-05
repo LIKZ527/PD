@@ -600,6 +600,16 @@ def query_ai_purchase_quantity(
             d_str = str(d_day)[:10]
         plan.setdefault(w_h, {}).setdefault(c_n, {}).setdefault(s_m, {})[d_str] = int(t_c or 0)
 
+    # 统一输出：每个「仓库→合同→冶炼厂」下，请求区间内每日均有键，无数据为 0
+    date_keys = _date_range(sd.strftime("%Y-%m-%d"), ed.strftime("%Y-%m-%d"))
+    for contracts in plan.values():
+        for smelters in contracts.values():
+            for sm_key in list(smelters.keys()):
+                day_map = smelters[sm_key]
+                smelters[sm_key] = {
+                    dk: int(day_map.get(dk, 0) or 0) for dk in date_keys
+                }
+
     return {
         "success": True,
         "message": "",
