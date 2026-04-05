@@ -8,7 +8,7 @@ from typing import Any, Optional
 import random
 from decimal import Decimal
 
-from fastapi import APIRouter, HTTPException, Query, Body, Depends
+from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.services.allocation_service import (
@@ -21,11 +21,12 @@ from app.services.allocation_service import (
     get_filter_options,
     query_ai_purchase_quantity,
 )
-from core.auth import get_current_user
 from app.services.contract_service import get_conn
 
 
 router = APIRouter(prefix="/allocation", tags=["分配规划"])
+# 不挂载全局 HTTPBearer：供外部/脚本直接调用，OpenAPI 中不显示锁与 Authorization
+public_router = APIRouter(prefix="/allocation", tags=["分配规划"])
 logger = logging.getLogger(__name__)
 
 
@@ -162,7 +163,18 @@ class ActiveContractsListResponse(BaseModel):
 class PurchaseQuantityQueryRequest(BaseModel):
     """AI 预测报货数量：统一查询请求体。"""
 
-    model_config = ConfigDict(title="AI预测报货查询请求")
+    model_config = ConfigDict(
+        title="AI预测报货查询请求",
+        json_schema_extra={
+            "example": {
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-07",
+                "warehouse": None,
+                "contract_no": None,
+                "smelter": None,
+            }
+        },
+    )
 
     start_date: str = Field(..., description="规划/展示起始日 YYYY-MM-DD")
     end_date: str = Field(..., description="规划/展示结束日 YYYY-MM-DD，须 ≥ start_date")
@@ -752,15 +764,46 @@ async def get_warehouse_capacity():
         raise HTTPException(status_code=500, detail=f"获取仓库产能失败: {str(e)}")
 
 
-@router.post(
+@public_router.post(
     "/purchase-quantity/query",
     summary="AI 预测报货数量：统一查询",
+    description=(
+        "**无需登录**：不要求也不校验 `Authorization` Bearer Token，可被内网脚本或对接方直接调用。\n\n"
+        "**请求体须为合法 JSON**（`Content-Type: application/json`）："
+        "键名必须用 **英文双引号** 包裹；不要用 Python/JavaScript 单引号；不要尾逗号；不要注释。"
+        "若出现 **422** 且 `json_invalid` / `Expecting property name enclosed in double quotes`，"
+        "说明正文不是标准 JSON，请对照下方示例修正。\n\n"
+        "一次请求返回 `warehouse_options` 与 `plan`（仓库→合同→冶炼厂→日期→车数），"
+        "数据来自最近一次写入的 `pd_allocation_predictions`，按 `delivery_date` 落在请求区间内筛选。"
+    ),
     response_description="校验参数、服务端筛选，返回下拉仓库列表与四层嵌套 plan",
     response_model=PurchaseQuantityQueryEnvelope,
 )
 async def post_purchase_quantity_query(
-    body: PurchaseQuantityQueryRequest,
-    current_user: dict = Depends(get_current_user),
+    body: PurchaseQuantityQueryRequest = Body(
+        openapi_examples={
+            "仅日期区间": {
+                "summary": "最简：只传起止日，其余可省略或为 null",
+                "value": {
+                    "start_date": "2026-04-01",
+                    "end_date": "2026-04-07",
+                    "warehouse": None,
+                    "contract_no": None,
+                    "smelter": None,
+                },
+            },
+            "带筛选条件": {
+                "summary": "指定仓库 / 合同子串 / 冶炼厂关键字",
+                "value": {
+                    "start_date": "2026-04-01",
+                    "end_date": "2026-04-30",
+                    "warehouse": "河南金铅仓库",
+                    "contract_no": "HT-2024",
+                    "smelter": "金利",
+                },
+            },
+        }
+    ),
 ):
     """
     一次请求返回 `warehouse_options` 与 `plan`（仓库→合同→冶炼厂→日期→车数），

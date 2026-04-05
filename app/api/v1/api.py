@@ -19,6 +19,10 @@ from app.api.v1.routes import (
 )
 
 api_router = APIRouter()
+# 挂载在 main 时不加全局 HTTPBearer，与需登录的 v1 接口分离
+public_api_router = APIRouter()
+public_api_router.include_router(allocation.public_router)
+
 api_router.include_router(agent_chat.router)
 api_router.include_router(contracts.router, tags=["合同管理"])
 api_router.include_router(customers.router, tags=["客户管理"])

@@ -31,7 +31,7 @@ import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from database_setup import create_tables
-from app.api.v1.api import api_router
+from app.api.v1.api import api_router, public_api_router
 from app.core.config import settings
 from app.api.v1.user.routes import register_pd_auth_routes
 from core.auth import get_user_identity_from_authorization
@@ -112,6 +112,8 @@ app.add_middleware(
 )
 
 # ========== 只添加 dependencies ==========
+# 公开 v1 子路由（无 Bearer 要求；OpenAPI 单接口不显示锁）
+app.include_router(public_api_router, prefix="/api/v1")
 app.include_router(api_router, prefix="/api/v1", dependencies=[Depends(security)])
 register_pd_auth_routes(app)
 logger = get_logger("app")
