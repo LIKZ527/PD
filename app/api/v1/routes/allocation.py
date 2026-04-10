@@ -182,6 +182,13 @@ class PurchaseQuantityQueryRequest(BaseModel):
     warehouse: Optional[str] = Field(None, description="仓库名称；空表示全部")
     contract_no: Optional[str] = Field(None, description="合同编号，后端按子串模糊匹配；空表示不筛")
     smelter: Optional[str] = Field(None, description="冶炼厂关键字（如 金利、豫光）；空表示全部")
+    direct_table: bool = Field(
+        True,
+        description=(
+            "是否直接按条件查询 `pd_allocation_predictions`（true）;"
+            "为 false 时沿用旧逻辑：仅查询最新 prediction_date 快照"
+        ),
+    )
 
     @field_validator("start_date", "end_date", mode="before")
     @classmethod
@@ -213,16 +220,16 @@ class PurchaseQuantityDataPayload(BaseModel):
                         "HT-2026-001": {
                             "金利": {
                                 "2026-04-05": 2,
-                                "2026-04-06": 1,
-                                "2026-04-07": 0,
+                                "2026-04-06": 2,
+                                "2026-04-07": 2,
                             }
                         },
                         "HT-2026-002": {
-                            "豫光": {"2026-04-05": 3, "2026-04-06": 2}
+                            "豫光": {"2026-04-05": 3, "2026-04-06": 3, "2026-04-07": 2}
                         },
                     },
                     "山西仓库": {
-                        "HT-2026-010": {"株冶": {"2026-04-05": 1}}
+                        "HT-2026-010": {"株冶": {"2026-04-05": 1, "2026-04-06": 1}}
                     },
                 },
             }
@@ -235,7 +242,10 @@ class PurchaseQuantityDataPayload(BaseModel):
     )
     plan: dict[str, dict[str, dict[str, dict[str, int]]]] = Field(
         default_factory=dict,
-        description="仓库 → 合同编号 → 冶炼厂 → 日期(YYYY-MM-DD) → 预测车数；区间内无数据日为 0",
+        description=(
+            "仓库 → 合同编号 → 冶炼厂 → 日期(YYYY-MM-DD) → 预测车数；"
+            "服务端将区间内该车数合计按整数均分到每日（前若干日多 1），每日有键、总和与快照一致"
+        ),
     )
 
 
@@ -851,7 +861,8 @@ async def get_warehouse_capacity():
         "**前提**：库表 `pd_allocation_predictions` 中须已有预测数据（由 **GET /api/v1/allocation/plan** 生成并写入，该接口同样无需登录；"
         "若从未调用或表为空，则 `plan` 恒为 `{}`，`message` 会提示先生成计划）。\n\n"
         "一次请求返回 `warehouse_options` 与 `plan`（仓库→合同→冶炼厂→日期→车数），"
-        "数据来自最近一次写入的快照，按 `delivery_date` 落在请求区间内筛选。"
+        "数据来自最近一次写入的快照，按 `delivery_date` 落在请求区间内汇总后，"
+        "再按每条曲线将区间内总车数整数均分到请求起止的每一天（便于图表连续展示）。"
     ),
     response_description="校验参数、服务端筛选，返回下拉仓库列表与四层嵌套 plan",
     response_model=PurchaseQuantityQueryEnvelope,
@@ -867,6 +878,7 @@ async def post_purchase_quantity_query(
                     "warehouse": None,
                     "contract_no": None,
                     "smelter": None,
+                    "direct_table": True,
                 },
             },
             "带筛选条件": {
@@ -877,6 +889,7 @@ async def post_purchase_quantity_query(
                     "warehouse": "河南金铅仓库",
                     "contract_no": "HT-2024",
                     "smelter": "金利",
+                    "direct_table": True,
                 },
             },
         }
@@ -885,7 +898,8 @@ async def post_purchase_quantity_query(
     """
     统一 JSON：`{ "success", "message", "data" }`；`data` 含 `warehouse_options` 与四层嵌套 `plan`
     （仓库→合同→冶炼厂→日期→车数）。数据来自最近一次 `pd_allocation_predictions` 快照，
-    按 `delivery_date` 落在 [start_date, end_date] 筛选；区间内每个日期均有键，无预测为 0。
+    按 `delivery_date` 落在 [start_date, end_date] 汇总后，将每条「仓库→合同→冶炼厂」
+    的区间内总车数整数均分到该区间每一天（每日有键；总量不可整除时前几日多 1 车）。
     失败时 `success` 为 false、`data` 为 null，HTTP 仍为 200（与 `/t1/get_purchase_suggestion` 一致）。
     本接口为公开调用，不传登录用户：`warehouse_options` 为**全部启用仓库**（不按大区经理裁剪）。
     若需「仅本人负责仓库」，请使用带登录态的同逻辑接口（如兼容路由）或后续单独封装。
@@ -896,6 +910,7 @@ async def post_purchase_quantity_query(
         warehouse=body.warehouse,
         contract_no=body.contract_no,
         smelter=body.smelter,
+        direct_table=body.direct_table,
         current_user=None,
     )
     if raw.get("success") and raw.get("data") is not None:
