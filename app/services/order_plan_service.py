@@ -3,6 +3,7 @@
 """
 import logging
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from pymysql.cursors import DictCursor
@@ -25,7 +26,46 @@ VALID_AUDIT_STATUSES = frozenset(
     {AUDIT_STATUS_PENDING, AUDIT_STATUS_APPROVED, AUDIT_STATUS_REJECTED}
 )
 
+_ORDER_PLAN_COLUMNS_ENSURED = False
+def _ensure_order_plan_new_columns() -> None:
+    """旧库补全订货计划签到时间和结算价格字段"""
+    global _ORDER_PLAN_COLUMNS_ENSURED
+    if getattr(OrderPlanService, '_columns_ensured', False):
+        return
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pd_order_plans'
+                    """
+                )
+                existing = {row[0] for row in (cur.fetchall() or [])}
 
+                # 补全签到时间字段
+                if "sign_in_deadline" not in existing:
+                    cur.execute(
+                        """
+                        ALTER TABLE pd_order_plans
+                        ADD COLUMN sign_in_deadline VARCHAR(64) DEFAULT NULL COMMENT '签到截止时间，示例：4.9号下午五点前签到'
+                        """
+                    )
+                    logger.info("pd_order_plans 已添加 sign_in_deadline 列")
+
+                # 补全结算价格字段
+                if "settlement_price" not in existing:
+                    cur.execute(
+                        """
+                        ALTER TABLE pd_order_plans
+                        ADD COLUMN settlement_price DECIMAL(12, 2) DEFAULT NULL COMMENT '结算价格（仅用于统计核对，不参与计算），示例：9630'
+                        """
+                    )
+                    logger.info("pd_order_plans 已添加 settlement_price 列")
+            conn.commit()
+        OrderPlanService._columns_ensured = True
+    except Exception as e:
+        logger.warning("ensure_order_plan_new_columns skipped/failed: %s", e)
 def _ensure_order_plan_remark_column() -> None:
     """旧库补全订货计划审核备注字段（仅执行一次）。"""
     global _ORDER_PLAN_REMARK_ENSURED
@@ -67,6 +107,7 @@ def _serialize_row(row: Dict[str, Any]) -> Dict[str, Any]:
 class OrderPlanService:
     _SELECT = """
         id, delivery_plan_id, plan_no, smelter_name, truck_count, audit_status, audit_remark,
+        sign_in_deadline, settlement_price,
         created_by, created_by_name, updated_by, updated_by_name,
         created_at, updated_at
     """
@@ -148,10 +189,13 @@ class OrderPlanService:
         plan_no: str,
         truck_count: int,
         *,
+        sign_in_deadline: Optional[str] = None,  # 新增
+        settlement_price: Optional[float] = None,  # 新增
         operator_id: Optional[int] = None,
         operator_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         _ensure_order_plan_remark_column()
+        _ensure_order_plan_new_columns()
         plan_no = (plan_no or "").strip()
         if not plan_no:
             return {"success": False, "error": "报货计划编号不能为空"}
@@ -204,7 +248,12 @@ class OrderPlanService:
                             "success": False,
                             "error": "您在该报货计划下已有订货计划，每位大区经理同一报货计划仅限一条",
                         }
-
+                    settlement_price_decimal = None
+                    if settlement_price is not None:
+                        try:
+                            settlement_price_decimal = Decimal(str(settlement_price))
+                        except Exception:
+                            return {"success": False, "error": "结算价格格式无效"}
                     limit_err = self._validate_truck_limit(
                         cur,
                         delivery_plan_id,
@@ -218,8 +267,9 @@ class OrderPlanService:
                         """
                         INSERT INTO pd_order_plans (
                             delivery_plan_id, plan_no, smelter_name, truck_count, audit_status,
+                            sign_in_deadline, settlement_price,  -- 新增
                             created_by, created_by_name, updated_by, updated_by_name
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             delivery_plan_id,
@@ -227,6 +277,8 @@ class OrderPlanService:
                             smelter,
                             truck_count,
                             AUDIT_STATUS_PENDING,
+                            sign_in_deadline,  # 新增
+                            settlement_price_decimal,  # 新增
                             operator_id,
                             operator_name,
                             operator_id,
@@ -356,6 +408,188 @@ class OrderPlanService:
             logger.error("list order plans failed: %s", e)
             return {"success": False, "error": str(e)}
 
+    def update_order_plan_fields(
+            self,
+            order_plan_id: int,
+            *,
+            truck_count: Optional[int] = None,
+            sign_in_deadline: Optional[str] = None,
+            settlement_price: Optional[float] = None,
+            operator_id: Optional[int] = None,
+            operator_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        更新订货计划的可修改字段（仅审核通过/审核未通过状态可修改）
+        支持修改：车数、签到时间、结算价格
+        """
+        # 至少有一个字段需要更新
+        if truck_count is None and sign_in_deadline is None and settlement_price is None:
+            return {"success": False, "error": "未提供任何需要更新的字段"}
+
+        # 车数校验
+        if truck_count is not None and truck_count < 1:
+            return {"success": False, "error": "车数须大于 0"}
+
+        _ensure_order_plan_remark_column()
+        _ensure_order_plan_new_columns()
+
+        try:
+            with get_conn() as conn:
+                prev_ac = conn.get_autocommit()
+                conn.autocommit(False)
+                try:
+                    with conn.cursor(DictCursor) as cur:
+                        # 查询并锁定记录
+                        cur.execute(
+                            """
+                            SELECT id, audit_status, delivery_plan_id, truck_count, plan_no
+                            FROM pd_order_plans
+                            WHERE id = %s
+                            FOR UPDATE
+                            """,
+                            (order_plan_id,),
+                        )
+                        row = cur.fetchone()
+                        if not row:
+                            conn.rollback()
+                            return {
+                                "success": False,
+                                "error": f"订货计划 ID {order_plan_id} 不存在",
+                            }
+
+                        current_status = row.get("audit_status")
+                        if current_status not in (
+                                AUDIT_STATUS_APPROVED,
+                                AUDIT_STATUS_REJECTED,
+                        ):
+                            conn.rollback()
+                            return {
+                                "success": False,
+                                "error": "仅「审核通过」或「审核未通过」状态的订货计划可修改",
+                            }
+
+                        # 构建动态 UPDATE 语句
+                        update_fields = []
+                        params = []
+
+                        # 车数更新逻辑
+                        if truck_count is not None:
+                            old_truck_count = int(row.get("truck_count") or 0)
+                            plan_no_row = (row.get("plan_no") or "").strip()
+                            delivery_plan_id = int(row.get("delivery_plan_id"))
+
+                            # 仅「待审核/审核通过」计入报货计划车数上限，「审核未通过」不计入
+                            include_candidate = current_status in (
+                                AUDIT_STATUS_PENDING,
+                                AUDIT_STATUS_APPROVED,
+                            )
+                            limit_err = self._validate_truck_limit(
+                                cur,
+                                delivery_plan_id,
+                                truck_count,
+                                include_candidate=include_candidate,
+                                exclude_order_plan_id=order_plan_id,
+                            )
+                            if limit_err:
+                                conn.rollback()
+                                return {"success": False, "error": limit_err}
+
+                            # 审核通过时已累加报货计划已定车数；改车数须同步，避免再次审核时重复累加
+                            delta_confirmed = 0
+                            if current_status == AUDIT_STATUS_APPROVED:
+                                delta_confirmed = truck_count - old_truck_count
+                            if delta_confirmed != 0:
+                                if not plan_no_row:
+                                    conn.rollback()
+                                    return {
+                                        "success": False,
+                                        "error": "订货计划缺少报货计划编号，无法同步已定车数",
+                                    }
+                                try:
+                                    apply_adjust_confirmed_trucks(
+                                        cur,
+                                        plan_no_row,
+                                        delta_confirmed,
+                                        operator_id=operator_id,
+                                        operator_name=operator_name,
+                                    )
+                                except ValueError as e:
+                                    conn.rollback()
+                                    return {"success": False, "error": str(e)}
+
+                            update_fields.append("truck_count = %s")
+                            params.append(truck_count)
+
+                        # 签到时间更新
+                        if sign_in_deadline is not None:
+                            # 空字符串转为 None
+                            sid = sign_in_deadline.strip() if sign_in_deadline else None
+                            update_fields.append("sign_in_deadline = %s")
+                            params.append(sid)
+
+                        # 结算价格更新
+                        if settlement_price is not None:
+                            try:
+                                sp = Decimal(str(settlement_price))
+                                update_fields.append("settlement_price = %s")
+                                params.append(sp)
+                            except Exception:
+                                conn.rollback()
+                                return {"success": False, "error": "结算价格格式无效"}
+
+                        # 如果没有任何实际变更的字段
+                        if not update_fields:
+                            conn.rollback()
+                            return {"success": False, "error": "未提供有效的更新字段"}
+
+                        # 更新时间戳和操作人
+                        update_fields.extend([
+                            "updated_by = %s",
+                            "updated_by_name = %s"
+                        ])
+                        params.extend([operator_id, operator_name])
+
+                        # WHERE 条件参数
+                        params.append(order_plan_id)
+                        params.append(current_status)
+
+                        cur.execute(
+                            f"""
+                            UPDATE pd_order_plans
+                            SET {', '.join(update_fields)}
+                            WHERE id = %s AND audit_status = %s
+                            """,
+                            tuple(params)
+                        )
+
+                        if cur.rowcount == 0:
+                            conn.rollback()
+                            return {
+                                "success": False,
+                                "error": "数据已被他人更新，请刷新后重试",
+                            }
+
+                        # 查询更新后的数据返回
+                        cur.execute(
+                            f"SELECT {self._SELECT.strip()} FROM pd_order_plans WHERE id = %s",
+                            (order_plan_id,),
+                        )
+                        out = cur.fetchone()
+
+                    conn.commit()
+                    return {
+                        "success": True,
+                        "message": "订货计划已更新",
+                        "data": _serialize_row(out) if out else {},
+                    }
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.autocommit(prev_ac)
+        except Exception as e:
+            logger.error("update order plan fields failed: %s", e)
+            return {"success": False, "error": str(e)}
     def update_truck_count_only(
         self,
         order_plan_id: int,

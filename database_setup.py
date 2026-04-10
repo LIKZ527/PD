@@ -268,6 +268,8 @@ TABLE_STATEMENTS = [
 		truck_count INT NOT NULL DEFAULT 0 COMMENT '订货车数',
 		audit_status VARCHAR(32) NOT NULL DEFAULT '待审核' COMMENT '审核状态：待审核/审核通过/审核未通过',
 		audit_remark TEXT DEFAULT NULL COMMENT '审核备注/原因',
+		sign_in_deadline VARCHAR(64) DEFAULT NULL COMMENT '签到截止时间，示例：4.9号下午五点前签到',
+    	settlement_price DECIMAL(12, 2) DEFAULT NULL COMMENT '结算价格（仅用于统计核对，不参与计算），示例：9630',
 		created_by BIGINT DEFAULT NULL COMMENT '创建人用户ID',
 		created_by_name VARCHAR(64) DEFAULT NULL COMMENT '创建人姓名',
 		updated_by BIGINT DEFAULT NULL COMMENT '最后操作人用户ID',

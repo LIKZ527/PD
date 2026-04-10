@@ -45,12 +45,41 @@ class OrderPlanCreateRequest(BaseModel):
         description="报货计划编号（关联 pd_delivery_plans.plan_no）",
     )
     truck_count: int = Field(..., ge=0, description="订货车数")
+    # ===== 新增字段 =====
+    sign_in_deadline: Optional[str] = Field(
+        None,
+        max_length=64,
+        description="签到截止时间，示例：4.9号下午五点前签到",
+    )
+    settlement_price: Optional[float] = Field(
+        None,
+        ge=0,
+        description="结算价格（仅用于统计核对，不参与计算），示例：9630",
+    )
+    # ===== 新增结束 =====
 
 
 class OrderPlanTruckCountPatch(BaseModel):
     truck_count: int = Field(..., ge=1, description="订货车数（须 ≥1，不可改为 0）")
 
+class OrderPlanFieldsPatch(BaseModel):
+    truck_count: Optional[int] = Field(None, ge=1, description="订货车数（须 ≥1）")
+    sign_in_deadline: Optional[str] = Field(
+        None,
+        max_length=64,
+        description="签到截止时间，示例：4.9号下午五点前签到",
+    )
+    settlement_price: Optional[float] = Field(
+        None,
+        ge=0,
+        description="结算价格（仅用于统计核对，不参与计算），示例：9630",
+    )
 
+    @model_validator(mode="after")
+    def at_least_one_field(self):
+        if self.truck_count is None and self.sign_in_deadline is None and self.settlement_price is None:
+            raise ValueError("至少需要提供一个要修改的字段")
+        return self
 class OrderPlanAuditRequest(BaseModel):
     audit_result: Literal["审核通过", "审核未通过"] = Field(
         ..., description="审核结论：审核通过 / 审核未通过"
@@ -79,6 +108,8 @@ async def create_order_plan(
     result = service.create(
         request.plan_no,
         request.truck_count,
+        sign_in_deadline=request.sign_in_deadline,      # 新增
+        settlement_price=request.settlement_price,      # 新增
         operator_id=op_id,
         operator_name=op_name,
     )
@@ -170,6 +201,32 @@ async def get_order_plan(
         raise HTTPException(status_code=404, detail=err)
     raise HTTPException(status_code=500, detail=err)
 
+@router.patch(
+    "/{order_plan_id}/update",
+    summary="修改订货计划（车数/签到时间/结算价格，仅审核通过/审核未通过可改）",
+    response_model=dict,
+)
+async def patch_order_plan(
+    order_plan_id: int,
+    body: OrderPlanFieldsPatch,
+    current_user: dict = Depends(get_current_user),
+    service: OrderPlanService = Depends(get_order_plan_service),
+):
+    op_id, op_name = _operator_from_user(current_user)
+    result = service.update_order_plan_fields(
+        order_plan_id,
+        truck_count=body.truck_count,
+        sign_in_deadline=body.sign_in_deadline,
+        settlement_price=body.settlement_price,
+        operator_id=op_id,
+        operator_name=op_name,
+    )
+    if result.get("success"):
+        return result
+    err = result.get("error", "更新失败")
+    if "不存在" in str(err):
+        raise HTTPException(status_code=404, detail=err)
+    raise HTTPException(status_code=400, detail=err)
 
 @router.patch(
     "/{order_plan_id}/truck-count",
