@@ -24,6 +24,8 @@ setup_logging()
 from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+from app.core.exceptions import BusinessException
 from fastapi.security import HTTPBearer
 from contextlib import asynccontextmanager
 import uvicorn
@@ -87,7 +89,19 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     logger.info("scheduler started")
+    try:
+        from app.intelligent_prediction.services.cache_manager import get_cache_manager
+
+        await get_cache_manager().redis.connect()
+    except Exception as e:
+        logger.warning("intelligent_prediction Redis 连接跳过（不影响主服务）：%s", e)
     yield
+    try:
+        from app.intelligent_prediction.services.cache_manager import get_cache_manager
+
+        await get_cache_manager().redis.close()
+    except Exception:
+        pass
     scheduler.shutdown(wait=False)
     print("应用关闭")
 
@@ -102,6 +116,17 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
+@app.exception_handler(BusinessException)
+async def business_exception_handler(request: Request, exc: BusinessException) -> JSONResponse:
+    """智能预测等模块的业务异常统一 JSON 响应。"""
+    _ = request
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": exc.message, "details": exc.details},
+    )
+
+
 cors_origins = [origin.strip() for origin in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -110,6 +135,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if settings.prediction_prometheus_enabled:
+    from prometheus_fastapi_instrumentator import Instrumentator
+
+    Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 # ========== 只添加 dependencies ==========
 # 公开 v1 子路由（无 Bearer 要求；OpenAPI 单接口不显示锁）

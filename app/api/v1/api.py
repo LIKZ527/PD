@@ -1,5 +1,7 @@
 from fastapi import APIRouter
 
+from app.intelligent_prediction.api.v1.router import intelligent_prediction_router
+
 from app.api.v1.routes import (
     agent_chat,
     allocation,
@@ -38,3 +40,5 @@ api_router.include_router(exception_types.router, tags=["异常审核"])
 api_router.include_router(exception_reports.router, tags=["异常审核"])
 api_router.include_router(allocation.router, tags=["分配规划"])
 api_router.include_router(t1_compat.router)
+api_router.include_router(intelligent_prediction_router, tags=["智能预测模块"])
+

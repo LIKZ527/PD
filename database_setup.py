@@ -646,6 +646,74 @@ TABLE_STATEMENTS = [
 		FOREIGN KEY (exception_type_id) REFERENCES pd_exception_types(id) ON DELETE SET NULL
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='异常上报表';
 	""",
+	# ========== 智能送货量预测（异步 ORM 与主库共用 MySQL）==========
+	"""
+	CREATE TABLE IF NOT EXISTS pd_ip_delivery_records (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+		regional_manager VARCHAR(255) NOT NULL COMMENT '大区经理',
+		warehouse VARCHAR(255) NOT NULL COMMENT '仓库',
+		delivery_date DATE NOT NULL COMMENT '送货日期',
+		product_variety VARCHAR(255) NOT NULL COMMENT '品种',
+		weight DECIMAL(18,4) NOT NULL COMMENT '重量',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+		INDEX idx_ip_delivery_date (delivery_date),
+		INDEX idx_ip_warehouse (warehouse),
+		INDEX idx_ip_product_variety (product_variety),
+		INDEX idx_ip_regional_manager (regional_manager)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='智能预测-送货历史';
+	""",
+	"""
+	CREATE TABLE IF NOT EXISTS pd_ip_prediction_batches (
+		id CHAR(36) NOT NULL PRIMARY KEY COMMENT '批次UUID字符串',
+		status VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT '状态',
+		celery_task_id VARCHAR(255) DEFAULT NULL COMMENT 'Celery任务ID',
+		error_message TEXT COMMENT '错误信息',
+		export_file_path VARCHAR(1024) DEFAULT NULL COMMENT '导出Excel路径',
+		meta JSON DEFAULT NULL COMMENT '请求元数据',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+		completed_at TIMESTAMP NULL DEFAULT NULL COMMENT '完成时间',
+		INDEX idx_ip_batch_status (status),
+		INDEX idx_ip_batch_celery (celery_task_id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='智能预测-批次任务';
+	""",
+	"""
+	CREATE TABLE IF NOT EXISTS pd_ip_prediction_results (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+		batch_id CHAR(36) DEFAULT NULL COMMENT '批次ID',
+		regional_manager VARCHAR(255) DEFAULT NULL COMMENT '大区经理',
+		warehouse VARCHAR(255) NOT NULL COMMENT '仓库',
+		product_variety VARCHAR(255) NOT NULL COMMENT '品种',
+		target_date DATE NOT NULL COMMENT '预测目标日',
+		predicted_weight DECIMAL(18,4) NOT NULL COMMENT '预测重量',
+		confidence VARCHAR(32) NOT NULL DEFAULT 'medium' COMMENT '信心',
+		warnings JSON DEFAULT NULL COMMENT '警告列表',
+		provider_used VARCHAR(64) DEFAULT NULL COMMENT '供应商',
+		latency_ms DECIMAL(12,4) DEFAULT NULL COMMENT '延迟毫秒',
+		cost_usd DECIMAL(12,6) DEFAULT NULL COMMENT '成本美元',
+		raw_response_excerpt TEXT COMMENT '原始摘要/解析备注',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+		INDEX idx_ip_res_batch (batch_id),
+		INDEX idx_ip_res_warehouse (warehouse),
+		INDEX idx_ip_res_variety (product_variety),
+		INDEX idx_ip_res_target_date (target_date),
+		CONSTRAINT fk_ip_res_batch FOREIGN KEY (batch_id) REFERENCES pd_ip_prediction_batches(id) ON DELETE SET NULL
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='智能预测-结果明细';
+	""",
+	"""
+	CREATE TABLE IF NOT EXISTS pd_ip_operation_audit (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+		user_id BIGINT DEFAULT NULL COMMENT '用户ID',
+		user_label VARCHAR(255) DEFAULT NULL COMMENT '用户标识或姓名',
+		action VARCHAR(64) NOT NULL COMMENT '操作类型',
+		resource VARCHAR(128) DEFAULT NULL COMMENT '资源简述',
+		detail JSON DEFAULT NULL COMMENT '详情JSON',
+		client_ip VARCHAR(64) DEFAULT NULL COMMENT '客户端IP',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+		INDEX idx_ip_audit_action (action),
+		INDEX idx_ip_audit_created (created_at)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='智能预测-操作审计';
+	""",
 ]
 
 def init_permission_definitions():
