@@ -420,7 +420,8 @@ class OrderPlanService:
     ) -> Dict[str, Any]:
         """
         更新订货计划的可修改字段（仅审核通过/审核未通过状态可修改）
-        支持修改：车数、签到时间、结算价格
+        支持修改：车数、签到时间、结算价格。
+        审核未通过状态下修改车数后，审核状态将重置为待审核。
         """
         # 至少有一个字段需要更新
         if truck_count is None and sign_in_deadline is None and settlement_price is None:
@@ -478,11 +479,13 @@ class OrderPlanService:
                             plan_no_row = (row.get("plan_no") or "").strip()
                             delivery_plan_id = int(row.get("delivery_plan_id"))
 
-                            # 仅「待审核/审核通过」计入报货计划车数上限，「审核未通过」不计入
+                            # 「待审核/审核通过」计入上限；「审核未通过」平时不计入，但改车数后将变为待审核，须按新车数计入
                             include_candidate = current_status in (
                                 AUDIT_STATUS_PENDING,
                                 AUDIT_STATUS_APPROVED,
                             )
+                            if current_status == AUDIT_STATUS_REJECTED:
+                                include_candidate = True
                             limit_err = self._validate_truck_limit(
                                 cur,
                                 delivery_plan_id,
@@ -519,6 +522,9 @@ class OrderPlanService:
 
                             update_fields.append("truck_count = %s")
                             params.append(truck_count)
+                            if current_status == AUDIT_STATUS_REJECTED:
+                                update_fields.append("audit_status = %s")
+                                params.append(AUDIT_STATUS_PENDING)
 
                         # 签到时间更新
                         if sign_in_deadline is not None:

@@ -1366,6 +1366,97 @@ class WeighbillService:
             logger.error(f"查询磅单失败: {e}")
             return None
 
+    def _ingest_weighbill_rows(
+        self,
+        weighbill_map: Dict[int, List[Dict[str, Any]]],
+        weighbill_columns: List[str],
+        weighbill_rows: List[Any],
+    ) -> None:
+        """将主列表查询得到的磅单行解析并入 weighbill_map（按 delivery_id 分组）。"""
+        for row in weighbill_rows:
+            wb = dict(zip(weighbill_columns, row))
+            delivery_id = wb["delivery_id"]
+
+            for key in ["weigh_date", "delivery_time", "created_at", "updated_at", "uploaded_at"]:
+                if wb.get(key):
+                    wb[key] = str(wb[key])
+            for key in ["gross_weight", "tare_weight", "net_weight", "unit_price", "total_amount", "service_fee"]:
+                if wb.get(key):
+                    wb[key] = float(wb[key])
+
+            if wb.get("warehouse_name") is None:
+                wb["warehouse_name"] = wb.get("warehouse")
+
+            unit_price_val = wb.get("unit_price")
+            net_weight_val = wb.get("net_weight")
+            service_fee_val = wb.get("service_fee") or 0
+
+            if unit_price_val:
+                unit_price_d = Decimal(str(unit_price_val))
+                payable_unit_price = (unit_price_d / Decimal("1.048")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                wb["payable_unit_price"] = float(payable_unit_price)
+
+                if net_weight_val:
+                    net_weight_d = Decimal(str(net_weight_val))
+                    service_fee_d = Decimal(str(service_fee_val))
+                    payable_calc = (payable_unit_price * net_weight_d - service_fee_d).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                    wb["payable_amount_calculated"] = float(payable_calc)
+                    receivable_calc = (unit_price_d * net_weight_d - service_fee_d).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                    wb["receivable_amount_calculated"] = float(receivable_calc)
+                else:
+                    wb["payable_amount_calculated"] = None
+                    wb["receivable_amount_calculated"] = None
+            else:
+                wb["payable_unit_price"] = None
+                wb["payable_amount_calculated"] = None
+                wb["receivable_amount_calculated"] = None
+
+            if wb.get("balance_payable_amount") is not None:
+                wb["payable_amount"] = float(wb.get("balance_payable_amount") or 0)
+            else:
+                net_weight = Decimal(str(wb.get("net_weight") or 0))
+                unit_price = Decimal(str(wb.get("unit_price") or 0))
+                wb["payable_amount"] = float(
+                    (net_weight * unit_price / Decimal("1.048")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                )
+
+            wb["is_manual_corrected_display"] = "是" if wb.get("is_manual_corrected") == 1 else "否"
+            wb["ocr_status_display"] = wb.get("ocr_status", "待上传磅单")
+            wb["has_delivery_order_display"] = "是" if wb.get("has_delivery_order") == "有" else "否"
+            if self._has_weighbill_audit_columns():
+                wb.setdefault("audit_status", "待审核")
+                wb.setdefault("audit_remark", None)
+            payout_status = wb.get("payout_status")
+            if payout_status is None:
+                payout_status = wb.get("is_paid_out")
+            if payout_status is not None:
+                wb["is_paid_out_display"] = "已打款" if payout_status == 1 else "待打款"
+            if wb.get("collection_status") is not None:
+                collection_map = {
+                    0: "待回款",
+                    1: "已回首笔待回尾款",
+                    2: "已回款",
+                }
+                wb["collection_status_display"] = collection_map.get(wb.get("collection_status"), "")
+
+            is_uploaded = wb.get("upload_status") == "已上传" and wb.get("weighbill_image")
+            wb["operations"] = {
+                "can_upload": not is_uploaded,
+                "can_modify": is_uploaded,
+                "can_view": is_uploaded,
+                "can_set_payment_schedule": is_uploaded,
+            }
+
+            if delivery_id not in weighbill_map:
+                weighbill_map[delivery_id] = []
+            weighbill_map[delivery_id].append(wb)
+
     def list_weighbills_grouped(
             self,
             exact_shipper: str = None,
@@ -1537,100 +1628,109 @@ class WeighbillService:
                     weighbill_columns = [desc[0] for desc in cur.description]
                     weighbill_rows = cur.fetchall()
 
-                    # 组织磅单数据
-                    weighbill_map = {}
-                    for row in weighbill_rows:
-                        wb = dict(zip(weighbill_columns, row))
-                        delivery_id = wb['delivery_id']
+                    weighbill_map: Dict[int, List[Dict[str, Any]]] = {}
+                    self._ingest_weighbill_rows(weighbill_map, weighbill_columns, weighbill_rows)
 
-                        # 转换字段
-                        for key in ["weigh_date", "delivery_time", "created_at", "updated_at", "uploaded_at"]:
-                            if wb.get(key):
-                                wb[key] = str(wb[key])
-                        for key in ["gross_weight", "tare_weight", "net_weight", "unit_price", "total_amount",
-                                    "service_fee"]:
-                            if wb.get(key):
-                                wb[key] = float(wb[key])
-
-                        if wb.get("warehouse_name") is None:
-                            wb["warehouse_name"] = wb.get("warehouse")
-
-                        # ========== 新增：计算应付单价、应付金额和回款金额 ==========
-                        unit_price_val = wb.get("unit_price")
-                        net_weight_val = wb.get("net_weight")
-                        service_fee_val = wb.get("service_fee") or 0
-
-                        if unit_price_val:
-                            unit_price_d = Decimal(str(unit_price_val))
-
-                            # 应付单价 = 合同单价 / 1.048
-                            payable_unit_price = (unit_price_d / Decimal('1.048')).quantize(Decimal('0.01'),
-                                                                                            rounding=ROUND_HALF_UP)
-                            wb["payable_unit_price"] = float(payable_unit_price)
-
-                            if net_weight_val:
-                                net_weight_d = Decimal(str(net_weight_val))
-                                service_fee_d = Decimal(str(service_fee_val))
-
-                                # 应付金额 = 应付单价 * 磅单净重 - 联单费
-                                payable_calc = (payable_unit_price * net_weight_d - service_fee_d).quantize(
-                                    Decimal('0.01'), rounding=ROUND_HALF_UP)
-                                wb["payable_amount_calculated"] = float(payable_calc)
-
-                                # 回款金额 = 合同单价 * 磅单净重 - 联单费
-                                receivable_calc = (unit_price_d * net_weight_d - service_fee_d).quantize(
-                                    Decimal('0.01'), rounding=ROUND_HALF_UP)
-                                wb["receivable_amount_calculated"] = float(receivable_calc)
-                            else:
-                                wb["payable_amount_calculated"] = None
-                                wb["receivable_amount_calculated"] = None
+                    # 库中无 pd_weighbills 行时主查询为空；对仍有合同与品种的报单补建占位行（与录单时一致），列表即可返回真实 id
+                    backfill_delivery_ids: List[int] = []
+                    for drow in delivery_rows:
+                        dpre = dict(zip(delivery_columns, drow))
+                        did = int(dpre["id"])
+                        total_wb_ct = int(dpre.get("total_weighbills") or 0)
+                        if total_wb_ct > 0 or weighbill_map.get(did):
+                            continue
+                        if exact_ocr_status and exact_ocr_status != "待上传磅单":
+                            continue
+                        if exact_schedule_status is not None and exact_schedule_status != 0:
+                            continue
+                        if exact_payout_status is not None and exact_payout_status != 0:
+                            continue
+                        if exact_collection_status is not None and exact_collection_status != 0:
+                            continue
+                        contract_no_bf = (dpre.get("contract_no") or "").strip()
+                        if not contract_no_bf:
+                            continue
+                        if dpre.get("products"):
+                            prods_bf = [p.strip() for p in str(dpre["products"]).split(",") if p.strip()]
                         else:
-                            wb["payable_unit_price"] = None
-                            wb["payable_amount_calculated"] = None
-                            wb["receivable_amount_calculated"] = None
-                        # ========== 新增结束 ==========
+                            pn = dpre.get("product_name")
+                            prods_bf = [str(pn).strip()] if pn else []
+                        prods_bf = [p for p in prods_bf if p]
+                        if not prods_bf:
+                            continue
+                        try:
+                            from app.services.delivery_service import DeliveryService
 
-                        # 应打款金额：优先使用结余表应付金额；无结余时按公式估算
-                        if wb.get("balance_payable_amount") is not None:
-                            wb["payable_amount"] = float(wb.get("balance_payable_amount") or 0)
-                        else:
-                            net_weight = Decimal(str(wb.get("net_weight") or 0))
-                            unit_price = Decimal(str(wb.get("unit_price") or 0))
-                            wb["payable_amount"] = float(
-                                (net_weight * unit_price / Decimal('1.048')).quantize(Decimal('0.01'),
-                                                                                     rounding=ROUND_HALF_UP)
+                            ds = DeliveryService()
+                            ds._ensure_weighbill_order_plan_last_column()
+                            cup = dpre.get("contract_unit_price")
+                            up_f = float(cup) if cup is not None else 0.0
+                            uid = dpre.get("uploader_id")
+                            try:
+                                uid_int = int(uid) if uid is not None else 0
+                            except (TypeError, ValueError):
+                                uid_int = 0
+                            op_raw = dpre.get("is_last_truck_for_order_plan")
+                            try:
+                                op_last_bf = bool(int(op_raw)) if op_raw is not None else False
+                            except (TypeError, ValueError):
+                                op_last_bf = bool(op_raw)
+                            vn = (dpre.get("vehicle_no") or "") or ""
+                            if len(vn) > 32:
+                                vn = vn[:32]
+                            uname = dpre.get("uploader_name") or "system"
+                            if isinstance(uname, str) and len(uname) > 64:
+                                uname = uname[:64]
+                            if ds._create_weighbills(
+                                delivery_id=did,
+                                contract_no=contract_no_bf,
+                                vehicle_no=vn,
+                                products=prods_bf,
+                                is_last_for_contract=False,
+                                unit_price=up_f,
+                                warehouse_name=dpre.get("warehouse"),
+                                uploader_id=uid_int,
+                                uploader_name=uname,
+                                is_last_for_order_plan=op_last_bf,
+                            ):
+                                backfill_delivery_ids.append(did)
+                        except Exception as ex:
+                            logger.warning(
+                                "list_weighbills_grouped: 补建磅单占位失败 delivery_id=%s err=%s",
+                                did,
+                                ex,
                             )
 
-                        wb["is_manual_corrected_display"] = "是" if wb.get("is_manual_corrected") == 1 else "否"
-                        wb["ocr_status_display"] = wb.get("ocr_status", "待上传磅单")
-                        wb["has_delivery_order_display"] = "是" if wb.get("has_delivery_order") == "有" else "否"
-                        if self._has_weighbill_audit_columns():
-                            wb.setdefault("audit_status", "待审核")
-                            wb.setdefault("audit_remark", None)
-                        payout_status = wb.get("payout_status")
-                        if payout_status is None:
-                            payout_status = wb.get("is_paid_out")
-                        if payout_status is not None:
-                            wb["is_paid_out_display"] = "已打款" if payout_status == 1 else "待打款"
-                        if wb.get("collection_status") is not None:
-                            collection_map = {
-                                0: "待回款",
-                                1: "已回首笔待回尾款",
-                                2: "已回款",
-                            }
-                            wb["collection_status_display"] = collection_map.get(wb.get("collection_status"), "")
-
-                        is_uploaded = wb.get("upload_status") == "已上传" and wb.get("weighbill_image")
-                        wb["operations"] = {
-                            "can_upload": not is_uploaded,
-                            "can_modify": is_uploaded,
-                            "can_view": is_uploaded,
-                            "can_set_payment_schedule": is_uploaded,
-                        }
-
-                        if delivery_id not in weighbill_map:
-                            weighbill_map[delivery_id] = []
-                        weighbill_map[delivery_id].append(wb)
+                    if backfill_delivery_ids:
+                        bf_placeholders = ",".join(["%s"] * len(backfill_delivery_ids))
+                        weighbill_where_bf = [f"w.delivery_id IN ({bf_placeholders})"] + weighbill_where[1:]
+                        weighbill_params_bf = list(backfill_delivery_ids) + weighbill_params[len(delivery_ids) :]
+                        weighbill_sql_bf = " AND ".join(weighbill_where_bf)
+                        cur.execute(
+                            f"""
+                        SELECT w.*, 
+                               d.report_date, d.warehouse, d.target_factory_name,
+                               d.driver_name, d.driver_phone, d.driver_id_card,
+                               d.has_delivery_order, d.shipper, d.payee, d.reporter_name,
+                               d.service_fee,
+                               b.schedule_status,
+                               b.payout_status,
+                               b.payable_amount as balance_payable_amount,
+                               pd.collection_status, pd.is_paid_out
+                        FROM pd_weighbills w
+                        JOIN pd_deliveries d ON w.delivery_id = d.id
+                        LEFT JOIN pd_balance_details b ON w.id = b.weighbill_id
+                        LEFT JOIN pd_payment_details pd ON pd.weighbill_id = w.id
+                        WHERE {weighbill_sql_bf}
+                        ORDER BY w.delivery_id, w.product_name
+                    """,
+                            tuple(weighbill_params_bf),
+                        )
+                        bf_columns = [desc[0] for desc in cur.description]
+                        bf_rows = cur.fetchall()
+                        for bid in backfill_delivery_ids:
+                            weighbill_map.pop(bid, None)
+                        self._ingest_weighbill_rows(weighbill_map, bf_columns, bf_rows)
 
                     # 组装结果
                     result_data = []
@@ -1655,6 +1755,38 @@ class WeighbillService:
 
                         delivery_id = delivery['id']
                         weighbills = weighbill_map.get(delivery_id, [])
+                        total_wb_row = int(delivery.get("total_weighbills") or 0)
+
+                        # 库中已有磅单行但均被当前筛选条件排除时，不使用无 id 的伪占位（避免与真实数据混淆）
+                        if not weighbills and total_wb_row > 0:
+                            tw_out = total_wb_row
+                            uw_out = int(delivery.get("uploaded_weighbills") or 0)
+                            result_data.append(
+                                {
+                                    "delivery_id": delivery_id,
+                                    "contract_no": delivery.get("contract_no"),
+                                    "report_date": delivery.get("report_date"),
+                                    "target_factory_name": delivery.get("target_factory_name"),
+                                    "driver_phone": delivery.get("driver_phone"),
+                                    "driver_name": delivery.get("driver_name"),
+                                    "driver_id_card": delivery.get("driver_id_card"),
+                                    "vehicle_no": delivery.get("vehicle_no"),
+                                    "has_delivery_order": delivery.get("has_delivery_order"),
+                                    "has_delivery_order_display": delivery.get("has_delivery_order_display"),
+                                    "upload_status": delivery.get("upload_status"),
+                                    "upload_status_display": delivery.get("upload_status_display"),
+                                    "shipper": delivery.get("shipper"),
+                                    "reporter_name": delivery.get("reporter_name"),
+                                    "payee": delivery.get("payee"),
+                                    "warehouse": delivery.get("warehouse"),
+                                    "service_fee": delivery.get("service_fee"),
+                                    "payable_amount": 0.0,
+                                    "total_weighbills": tw_out,
+                                    "uploaded_weighbills": uw_out,
+                                    "weighbills": [],
+                                }
+                            )
+                            continue
 
                         # 如果没有磅单记录，创建待上传占位
                         if not weighbills:
@@ -1695,6 +1827,7 @@ class WeighbillService:
                                     placeholder["audit_status"] = "待审核"
                                     placeholder["audit_remark"] = None
                                 weighbills.append(placeholder)
+                        tw_disp = max(int(delivery.get("total_weighbills") or 0), len(weighbills))
                         result_data.append({
                             "delivery_id": delivery_id,
                             "contract_no": delivery.get("contract_no"),
@@ -1714,7 +1847,7 @@ class WeighbillService:
                             "warehouse": delivery.get("warehouse"),
                             "service_fee": delivery.get("service_fee"),
                             "payable_amount": round(sum((wb.get("payable_amount") or 0) for wb in weighbills), 2),
-                            "total_weighbills": delivery.get("total_weighbills", 0),
+                            "total_weighbills": tw_disp,
                             "uploaded_weighbills": delivery.get("uploaded_weighbills", 0),
                             "weighbills": weighbills
                         })

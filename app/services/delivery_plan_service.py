@@ -19,11 +19,11 @@ _MAX_MYSQL_SIGNED_INT = 2147483647
 
 
 def planned_trucks_from_tonnage(tonnage: float) -> int:
-    """计划车数 = floor(计划吨数 / 35)；吨数 <= 0 时为 0。"""
+    """计划车数 = ceil(计划吨数 / 35)；吨数 <= 0 时为 0。"""
     t = float(tonnage or 0)
     if t <= 0:
         return 0
-    return int(math.floor(t / TONNAGE_PER_TRUCK))
+    return int(math.ceil(t / TONNAGE_PER_TRUCK))
 
 
 def normalize_planned_tonnage_for_db(value: Any) -> Tuple[Optional[Decimal], Optional[str]]:
