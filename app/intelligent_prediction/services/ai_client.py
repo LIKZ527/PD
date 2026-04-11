@@ -1,7 +1,8 @@
-"""多供应商 AI 客户端：OpenAI → Azure → Anthropic → 本地规则。"""
+"""多供应商 AI 客户端：Coze（.env: Coze_url / project_id / session_id / YOUR_TOKEN）→ OpenAI → Azure → Anthropic → 本地规则。"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import date, timedelta
@@ -13,6 +14,7 @@ import aiohttp
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.intelligent_prediction.utils.json_extract import extract_json_object
+from app.services.coze_agent_service import run_coze_agent_chat
 
 logger = get_logger(__name__)
 
@@ -156,6 +158,42 @@ class AIModelClient:
             return None, "anthropic", latency_ms, None, content, perr or "parse_failed"
         return parsed, "anthropic", latency_ms, None, content, ""
 
+    def _coze_configured(self) -> bool:
+        return bool(
+            (settings.coze_stream_url or "").strip()
+            and (settings.coze_bearer_token or "").strip()
+            and (settings.coze_project_id or "").strip()
+            and (settings.coze_session_id or "").strip()
+        )
+
+    async def _call_coze(
+        self,
+        system: str,
+        user: str,
+    ) -> tuple[dict[str, Any] | None, str, float, float | None, str, str]:
+        """调用 Coze stream_run；将 system 与 user 合并为单条 query。"""
+        combined = f"{system.strip()}\n\n{user.strip()}"
+        t0 = time.perf_counter()
+        result = await asyncio.to_thread(run_coze_agent_chat, combined)
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+        if not result.get("success"):
+            err = str(result.get("error") or "unknown")
+            logger.info(
+                "ai_call provider=coze latency_ms=%.2f cost_usd=None err=%s",
+                latency_ms,
+                err[:200],
+            )
+            return None, "coze", latency_ms, None, "", err
+        content = str(result.get("text") or "")
+        logger.info(
+            "ai_call provider=coze latency_ms=%.2f cost_usd=None",
+            latency_ms,
+        )
+        parsed, perr = extract_json_object(content)
+        if parsed is None:
+            return None, "coze", latency_ms, None, content, perr or "parse_failed"
+        return parsed, "coze", latency_ms, None, content, ""
+
     def _local_rule_json(
         self,
         system: str,
@@ -201,6 +239,12 @@ class AIModelClient:
         """依次尝试供应商，失败则本地规则。"""
         errors: list[str] = []
         async with aiohttp.ClientSession(timeout=self._timeout) as session:
+            if self._coze_configured():
+                parsed, prov, lat, cost, raw, err = await self._call_coze(system, user)
+                if parsed is not None:
+                    return parsed, prov, lat, cost, raw[:2000], errors
+                errors.append(f"coze:{err}")
+
             if settings.openai_api_key:
                 url = f"{settings.openai_api_base.rstrip('/')}/chat/completions"
                 headers = {
