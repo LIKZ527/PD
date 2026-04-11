@@ -7,9 +7,11 @@ from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from pymysql.cursors import DictCursor
+from pymysql.err import DataError
 
 from app.services.contract_service import get_conn
 from app.services.delivery_plan_service import (
+    _mysql_duplicate_entry_value,
     apply_adjust_confirmed_trucks,
     apply_increment_confirmed_trucks,
     get_delivery_plan_service,
@@ -422,6 +424,7 @@ class OrderPlanService:
         更新订货计划的可修改字段（仅审核通过/审核未通过状态可修改）
         支持修改：车数、签到时间、结算价格。
         审核未通过状态下修改车数后，审核状态将重置为待审核。
+        【新增】修改车数时不能低于已报单总量
         """
         # 至少有一个字段需要更新
         if truck_count is None and sign_in_deadline is None and settlement_price is None:
@@ -440,6 +443,11 @@ class OrderPlanService:
                 conn.autocommit(False)
                 try:
                     with conn.cursor(DictCursor) as cur:
+                        cur.execute("SELECT id FROM pd_order_plans WHERE id = %s", (order_plan_id,))
+                        if not cur.fetchone():
+                            conn.rollback()
+                            return {"success": False, "error": f"报货计划 ID {order_plan_id} 不存在"}
+
                         # 查询并锁定记录
                         cur.execute(
                             """
@@ -496,6 +504,28 @@ class OrderPlanService:
                             if limit_err:
                                 conn.rollback()
                                 return {"success": False, "error": limit_err}
+
+                            # ========== 【新增】已报单下限校验 ==========
+                            cur.execute(
+                                """
+                                SELECT COALESCE(SUM(planned_trucks), 0) as used_trucks
+                                FROM pd_deliveries
+                                WHERE order_plan_id = %s AND status = '审核通过'
+                                """,
+                                (order_plan_id,)
+                            )
+                            used_trucks = int(cur.fetchone().get("used_trucks") or 0)
+                            
+                            if truck_count < used_trucks:
+                                conn.rollback()
+                                return {
+                                    "success": False,
+                                    "error": (
+                                        f"车数不能少于已报单总量："
+                                        f"已审核通过{used_trucks}车，申请修改为{truck_count}车"
+                                    )
+                                }
+                            # =========================================
 
                             # 审核通过时已累加报货计划已定车数；改车数须同步，避免再次审核时重复累加
                             delta_confirmed = 0
@@ -593,9 +623,31 @@ class OrderPlanService:
                     raise
                 finally:
                     conn.autocommit(prev_ac)
+        except DataError as e:
+            err = str(e)
+            if getattr(e, "args", None) and e.args[0] == 1264 and "planned_tonnage" in err:
+                logger.warning("update delivery plan planned_tonnage out of range: %s", e)
+                return {
+                    "success": False,
+                    "error": (
+                        "计划吨数超出当前数据库列允许范围，或表结构不是 DECIMAL(12,3)。"
+                        "请核对录入的吨数，或联系管理员检查/迁移 pd_delivery_plans.planned_tonnage。"
+                    ),
+                }
+            logger.exception("update delivery plan failed: %s", e)
+            return {"success": False, "error": err}
         except Exception as e:
-            logger.error("update order plan fields failed: %s", e)
-            return {"success": False, "error": str(e)}
+            err = str(e)
+            if "Duplicate entry" in err and "uk_plan_no" in err:
+                dup = _mysql_duplicate_entry_value(err)
+                msg = f"计划编号已存在：{dup}" if dup else "计划编号已存在"
+                logger.warning("update delivery plan duplicate: %s", msg)
+                return {"success": False, "error": msg}
+            if "Duplicate entry" in err and "uk_plan_category" in err:
+                logger.warning("update delivery plan duplicate category: %s", err)
+                return {"success": False, "error": "同一计划下品类不能重复"}
+            logger.exception("update delivery plan failed: %s", e)
+            return {"success": False, "error": err}    
     def update_truck_count_only(
         self,
         order_plan_id: int,
@@ -605,8 +657,8 @@ class OrderPlanService:
         operator_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        仅当订货计划当前为「审核通过」或「审核未通过」时可改车数（待审核不可改）。
-        只更新车数与操作人，审核状态不变；车数须 ≥1。
+        仅修改车数（仅审核通过/审核未通过可改；不改变审核状态；车数须 ≥1）
+        【新增】不能减少到已报单总量以下
         """
         if truck_count < 1:
             return {"success": False, "error": "车数须大于 0"}
@@ -665,6 +717,28 @@ class OrderPlanService:
                         if limit_err:
                             conn.rollback()
                             return {"success": False, "error": limit_err}
+
+                        # ========== 【新增】校验不小于已报单总量 ==========
+                        cur.execute(
+                            """
+                            SELECT COALESCE(SUM(planned_trucks), 0) as used_trucks
+                            FROM pd_deliveries
+                            WHERE order_plan_id = %s AND status = '审核通过'
+                            """,
+                            (order_plan_id,)
+                        )
+                        used_trucks = int(cur.fetchone().get("used_trucks") or 0)
+                        
+                        if truck_count < used_trucks:
+                            conn.rollback()
+                            return {
+                                "success": False,
+                                "error": (
+                                    f"不能减少到{truck_count}车，"
+                                    f"该订货计划已有{used_trucks}车报单审核通过"
+                                )
+                            }
+                        # =================================================
 
                         # 审核通过时已累加报货计划已定车数；改车数须同步，避免再次审核时重复累加
                         delta_confirmed = 0
@@ -732,7 +806,6 @@ class OrderPlanService:
         except Exception as e:
             logger.error("update order plan truck_count failed: %s", e)
             return {"success": False, "error": str(e)}
-
     def audit(
         self,
         order_plan_id: int,
