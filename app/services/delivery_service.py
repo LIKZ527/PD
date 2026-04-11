@@ -833,6 +833,121 @@ class DeliveryService:
             logger.error(f"创建磅单记录失败: {e}")
             return False
 
+    def _validate_manager_quota(
+        self,
+        cur,
+        reporter_id: Optional[int],
+        order_plan_id: Optional[int],
+        planned_trucks: int,
+        exclude_delivery_id: Optional[int] = None,
+    ) -> Optional[str]:
+        """
+        校验大区经理订货计划限额
+        
+        Args:
+            cur: 数据库cursor
+            reporter_id: 报单人ID（大区经理）
+            order_plan_id: 订货计划ID
+            planned_trucks: 本次报单车数
+            exclude_delivery_id: 排除的报单ID（用于修改时排除自己）
+        
+        Returns:
+            错误信息或None（通过）
+        """
+        # 无订货计划时不限制（兼容旧数据）
+        if not reporter_id or not order_plan_id:
+            return None
+        
+        # 查询订货计划信息
+        cur.execute(
+            """
+            SELECT truck_count, audit_status, plan_no 
+            FROM pd_order_plans 
+            WHERE id = %s
+            """,
+            (order_plan_id,)
+        )
+        plan = cur.fetchone()
+        if not plan:
+            return "关联的订货计划不存在"
+        
+        # 订货计划必须审核通过才能报单
+        if plan.get("audit_status") != "审核通过":
+            return f"订货计划[{plan.get('plan_no')}]未审核通过，无法报单"
+        
+        plan_trucks = int(plan.get("truck_count") or 0)
+        if plan_trucks <= 0:
+            return "订货计划车数无效"
+        
+        # 统计该订货计划下已审核通过的报单车数
+        sql = """
+            SELECT COALESCE(SUM(planned_trucks), 0) as used_trucks
+            FROM pd_deliveries
+            WHERE order_plan_id = %s 
+              AND status = '审核通过'
+        """
+        params = [order_plan_id]
+        
+        if exclude_delivery_id:
+            sql += " AND id != %s"
+            params.append(exclude_delivery_id)
+        
+        cur.execute(sql, tuple(params))
+        used_trucks = int(cur.fetchone().get("used_trucks") or 0)
+        
+        # 校验额度
+        if used_trucks + planned_trucks > plan_trucks:
+            remaining = plan_trucks - used_trucks
+            return (
+                f"超出订货计划限额：计划{plan_trucks}车，"
+                f"已用{used_trucks}车，剩余{remaining}车，"
+                f"本次申请{planned_trucks}车（超支{used_trucks + planned_trucks - plan_trucks}车）"
+            )
+        
+        return None  # 校验通过
+
+
+    def _validate_manager_quota_for_audit(
+        self,
+        delivery_id: int,
+        new_status: str,
+    ) -> Optional[str]:
+        """
+        审核时重新校验额度（独立事务，防止并发问题）
+        """
+        if new_status != "审核通过":
+            return None  # 审核未通过不校验
+        
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    # 获取报单信息
+                    cur.execute(
+                        """
+                        SELECT reporter_id, order_plan_id, planned_trucks, status
+                        FROM pd_deliveries WHERE id = %s
+                        """,
+                        (delivery_id,)
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return "报单不存在"
+                    
+                    # 已经是审核通过状态，无需重复校验
+                    if row.get("status") == "审核通过":
+                        return None
+                    
+                    reporter_id = row.get("reporter_id")
+                    order_plan_id = row.get("order_plan_id")
+                    planned_trucks = int(row.get("planned_trucks") or 0)
+                    
+                    return self._validate_manager_quota(
+                        cur, reporter_id, order_plan_id, planned_trucks
+                    )
+        except Exception as e:
+            logger.error(f"审核额度校验异常: {e}")
+            return f"额度校验失败: {str(e)}"
+
     def check_duplicate_in_24h(self, driver_phone: str, driver_id_card: str, exclude_id: int = None) -> Dict[str, Any]:
         """
         检查同一司机24小时内是否已报单
@@ -1128,6 +1243,16 @@ class DeliveryService:
                     "this_delivery_trucks": op_match.get("this_delivery_trucks"),
                 }
 
+            # ========== 【新增】大区经理订货计划限额校验 ==========
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    quota_error = self._validate_manager_quota(
+                        cur, reporter_id, order_plan_id, planned_trucks
+                    )
+                    if quota_error:
+                        return {"success": False, "error": quota_error}
+            # ===================================================
+
             # ---------- 插入数据库 ----------
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -1143,9 +1268,7 @@ class DeliveryService:
                         'contract_unit_price',
                         'total_amount', 'status', 'uploader_id', 'uploader_name',
                         'reporter_id', 'reporter_name', 'voucher_images',
-                        # ===== 需求4：新增字段 =====
                         'position',
-                        # ===== 需求4结束 =====
                     ]
                     main_product = products[0] if products else data.get('product_name')
                     # 确保主品种也经过映射
@@ -1259,7 +1382,7 @@ class DeliveryService:
                     "is_last_delivery": is_last_delivery,
                     "order_plan_id": order_plan_id,
                     "is_last_truck_for_order_plan": is_last_truck_for_order_plan,
-                    "voucher_images": data.get('voucher_images'),  # 新增字段
+                    "voucher_images": data.get('voucher_images'),
                     "contract_truck_info": {
                         "contract_total_trucks": match_result['contract_total_trucks'],
                         "contract_used_trucks": match_result['contract_used_trucks'],
@@ -1302,7 +1425,7 @@ class DeliveryService:
             voucher_images: List[bytes] = None,
             delete_image: bool = False,
             uploaded_by: str = None,
-            current_user: dict = None  # 新增参数
+            current_user: dict = None
     ) -> Dict[str, Any]:
         """更新报货订单（支持替换凭证图片列表）"""
         temp_new_files = []
@@ -1315,7 +1438,8 @@ class DeliveryService:
                     cur.execute(
                         """SELECT has_delivery_order, delivery_order_image, upload_status,
                                   driver_phone, driver_id_card, planned_trucks, contract_no,
-                                  voucher_images, vehicle_no
+                                  voucher_images, vehicle_no, reporter_id, order_plan_id,
+                                  status, quantity
                            FROM pd_deliveries WHERE id = %s""",
                         (delivery_id,)
                     )
@@ -1333,6 +1457,10 @@ class DeliveryService:
                         'contract_no': old[6],
                         'voucher_images': old[7],
                         'vehicle_no': old[8],
+                        'reporter_id': old[9],
+                        'order_plan_id': old[10],
+                        'status': old[11],
+                        'quantity': old[12],
                     }
 
                     # 解析原凭证图片列表（兼容历史数据中可能存储的布尔或非列表值）
@@ -1404,7 +1532,7 @@ class DeliveryService:
                             new_upload_status = '待上传'
                         # 如果没有提供 voucher_images，则保持原有凭证列表（不修改）
 
-                    # ========== 新增：处理品种字段映射 ==========
+                    # ========== 处理品种字段映射 ==========
                     if 'product_name' in data:
                         data['product_name'] = self._convert_to_mill_product(data['product_name'])
                     
@@ -1431,6 +1559,7 @@ class DeliveryService:
                                 "success": False,
                                 "error": "无权修改报单状态，仅审核主管或管理员可操作"
                             }
+                    
                     # 准备更新数据
                     update_data = {
                         'has_delivery_order': has_order,
@@ -1447,10 +1576,27 @@ class DeliveryService:
                         if key in data:
                             update_data[key] = data[key]
 
-                    # 如果修改了数量，重新计算车数
+                    # 如果修改了数量，重新计算车数并校验额度
                     if 'quantity' in data:
                         new_quantity = Decimal(str(data['quantity']))
-                        update_data['planned_trucks'] = self._calculate_trucks(new_quantity)
+                        new_planned_trucks = self._calculate_trucks(new_quantity)
+                        update_data['planned_trucks'] = new_planned_trucks
+
+                        # ========== 【新增】修改车数时重新校验额度 ==========
+                        # 只有非审核通过状态才能修改，但以防万一
+                        old_status = old.get('status')
+                        if old_status != '审核通过':
+                            quota_error = self._validate_manager_quota(
+                                cur, 
+                                old.get('reporter_id'), 
+                                old.get('order_plan_id'),
+                                new_planned_trucks,
+                                exclude_delivery_id=delivery_id  # 排除自己
+                            )
+                            if quota_error:
+                                conn.rollback()
+                                return {"success": False, "error": f"修改失败：{quota_error}"}
+                        # =================================================
 
                     # 构建更新SQL
                     fields = list(update_data.keys())
@@ -1509,7 +1655,6 @@ class DeliveryService:
                     pass
             logger.error(f"更新报货订单失败: {e}")
             return {"success": False, "error": str(e)}
-
     # delivery_service.py - class DeliveryService
 
     def _delete_unuploaded_weighbills_for_delivery(self, delivery_id: int) -> None:
@@ -1530,6 +1675,7 @@ class DeliveryService:
     def audit_delivery(self, delivery_id: int, new_status: str, current_user: dict) -> Dict[str, Any]:
         """
         审核报单，修改审核状态（仅限审核主管/管理员）
+        【新增】审核通过时校验大区经理订货计划限额
         """
         user_role = current_user.get("role") if current_user else None
         if user_role not in ["审核主管", "管理员"]:
@@ -1542,6 +1688,13 @@ class DeliveryService:
                 "success": False,
                 "error": f"无效状态，可选：{valid_status}"
             }
+
+        # ========== 【新增】审核通过时重新校验额度 ==========
+        if new_status == "审核通过":
+            quota_error = self._validate_manager_quota_for_audit(delivery_id, new_status)
+            if quota_error:
+                return {"success": False, "error": quota_error}
+        # =================================================
 
         # 调用通用更新方法（只传递 status 字段）
         result = self.update_delivery(
