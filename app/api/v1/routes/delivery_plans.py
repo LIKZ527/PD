@@ -47,12 +47,12 @@ class DeliveryPlanCreateRequest(BaseModel):
     planned_trucks: int = Field(
         0,
         ge=0,
-        description="计划车数（可忽略；服务端按 planned_tonnage 用 floor(吨/35) 覆盖）",
+        description="计划车数（可忽略；服务端按 planned_tonnage 用 ceil(吨/35) 覆盖）",
     )
     planned_tonnage: float = Field(
         0,
         ge=0,
-        description="计划吨数；计划车数 = floor(吨数/35)，未定车数 = max(0, 计划车数-已定车数)",
+        description="计划吨数；计划车数 = ceil(吨数/35)，未定车数 = max(0, 计划车数-已定车数)",
     )
     plan_status: str = Field("生效中", description="计划状态", max_length=32)
     confirmed_trucks: int = Field(0, ge=0, description="已定车数")
@@ -81,7 +81,7 @@ class DeliveryPlanUpdateRequest(BaseModel):
     planned_tonnage: Optional[float] = Field(
         None,
         ge=0,
-        description="计划吨数；提交时重算计划车数 floor(吨/35) 并重算未定车数",
+        description="计划吨数；提交时重算计划车数 ceil(吨/35) 并重算未定车数",
     )
     plan_status: Optional[str] = Field(None, description="计划状态", max_length=32)
     confirmed_trucks: Optional[int] = Field(None, ge=0, description="已定车数")
@@ -147,13 +147,13 @@ async def increment_confirmed_trucks(
 async def tonnage_to_planned_trucks(
     tonnage: float = Query(..., ge=0, description="计划吨数"),
 ):
-    """floor(吨数/35)，供前端输入吨数后即时展示车数。"""
+    """ceil(吨数/35)，供前端输入吨数后即时展示车数。"""
     trucks = planned_trucks_from_tonnage(tonnage)
     return {
         "planned_tonnage": tonnage,
         "planned_trucks": trucks,
         "tonnage_per_truck": TONNAGE_PER_TRUCK,
-        "formula": "planned_trucks = floor(planned_tonnage / 35)",
+        "formula": "planned_trucks = ceil(planned_tonnage / 35)",
     }
 
 

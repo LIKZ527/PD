@@ -7,7 +7,7 @@ dispatch_planner.py
   1. 从合同总量计算需要发货的总车数（合同总量 ÷ TONS_PER_TRUCK，向上取整）
   2. 合同有效期约束：只在 [contract_date, end_date] ∩ 规划窗口 内排布发货
   3. 各仓库每日发货能力上限（最大车数）
-  4. 目标：均匀到货——各冶炼厂每日到货车数方差最小（转化为线性约束）
+  4. 目标：均匀到货——优先使每合同每日总车数为整数均分；与产能冲突时退化为最小化与日均偏差
   5. 输出：{仓库: {冶炼厂: {日期: 车数}}}
 
 模型（LP）：
@@ -20,10 +20,11 @@ dispatch_planner.py
     (1) 合同总量约束：  sum_{w,d} x[w,s,d] == demand[s]      for each smelter s
     (2) 仓库日产能：    sum_s x[w,s,d] <= daily_cap[w]（若 daily_cap[w] 为 None 则不加此约束）
     (3) 合同有效期：    x[w,s,d] == 0  if d ∉ valid_dates[s]
-    (4) 均匀偏差定义：  sum_w x[w,s,d] - target[s] == dev_plus[s,d] - dev_minus[s,d]
+    (4) 均匀（优先）：  每合同每日 sum_w x[w,c,d] 等于该合同总车数在有效日上的整数均分
+    (5) 均匀（回退）：  sum_w x[w,c,d] - target == dev_plus - dev_minus
 
-  目标：
-    minimize  sum_{s,d} (dev_plus[s,d] + dev_minus[s,d])
+  目标（仅回退模式）：
+    minimize  sum_{c,d} (dev_plus[c,d] + dev_minus[c,d])
 """
 
 from __future__ import annotations
@@ -519,6 +520,7 @@ def query_ai_purchase_quantity(
     warehouse_names: Optional[List[str]] = None,
     contract_no: Optional[str] = None,
     smelter: Optional[str] = None,
+    direct_table: bool = True,
     max_days: int = 30,
     current_user: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -527,6 +529,8 @@ def query_ai_purchase_quantity(
     使用 `pd_allocation_predictions` 中最近一次 `prediction_date` 的全量快照，
     再按 `delivery_date` 落在 [start_date, end_date] 内筛选。
     若请求区间与快照内实际发货日无交集，会自动用「交集区间」再查一次，避免 plan 全空（仍按请求区间补全每日键，无数据为 0）。
+    返回前对每条「仓库→合同→冶炼厂」：将区间内预测车数**合计**按 `_spread_integer_total`
+    整数均分到请求区间**每一天**（前若干日多 1 车），便于图表每日连续、总量不变。
     大区经理仅可见本人名下仓库及 `regional_manager` 匹配的行；`warehouse` 须在可见列表内。
     """
     from app.services.contract_service import get_conn
@@ -562,36 +566,41 @@ def query_ai_purchase_quantity(
         if wh_filter not in warehouse_options:
             return _fail("无权筛选该仓库或该仓库不在您的负责范围", 403)
 
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT MAX(prediction_date) FROM pd_allocation_predictions")
-                latest_pd = _scalar_cell(cur.fetchone())
-    except Exception as e:
-        return _fail(f"查询预测数据失败: {e}", 500)
-
-    if not latest_pd:
-        return {
-            "success": True,
-            "message": (
-                "表 pd_allocation_predictions 中尚无预测快照，故 plan 为空。"
-                "请先调用「生成调度分配计划」接口写入数据：GET /api/v1/allocation/plan"
-                "（无需登录；可选参数 window_start、H、as_of_date）。"
-                "成功后再调用本查询接口即可返回 plan。"
-            ),
-            "data": {
-                "warehouse_options": warehouse_options,
-                "plan": {},
-            },
-        }
-
-    if hasattr(latest_pd, "strftime"):
-        latest_pd_str = latest_pd.strftime("%Y-%m-%d")
+    latest_pd_str: Optional[str] = None
+    if direct_table:
+        base_conditions: List[str] = []
+        base_params: List[Any] = []
     else:
-        latest_pd_str = str(latest_pd)[:10]
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT MAX(prediction_date) FROM pd_allocation_predictions")
+                    latest_pd = _scalar_cell(cur.fetchone())
+        except Exception as e:
+            return _fail(f"查询预测数据失败: {e}", 500)
 
-    base_conditions: List[str] = ["prediction_date = %s"]
-    base_params: List[Any] = [latest_pd_str]
+        if not latest_pd:
+            return {
+                "success": True,
+                "message": (
+                    "表 pd_allocation_predictions 中尚无预测快照，故 plan 为空。"
+                    "请先调用「生成调度分配计划」接口写入数据：GET /api/v1/allocation/plan"
+                    "（无需登录；可选参数 window_start、H、as_of_date）。"
+                    "成功后再调用本查询接口即可返回 plan。"
+                ),
+                "data": {
+                    "warehouse_options": warehouse_options,
+                    "plan": {},
+                },
+            }
+
+        if hasattr(latest_pd, "strftime"):
+            latest_pd_str = latest_pd.strftime("%Y-%m-%d")
+        else:
+            latest_pd_str = str(latest_pd)[:10]
+
+        base_conditions = ["prediction_date = %s"]
+        base_params = [latest_pd_str]
 
     if current_user and (current_user.get("role") or "").strip() == "大区经理":
         mgr_name = (current_user.get("name") or "").strip()
@@ -626,7 +635,7 @@ def query_ai_purchase_quantity(
     wh_expr = "COALESCE(NULLIF(TRIM(warehouse_name), ''), regional_manager, '未分配')"
 
     def _fetch_aggregate(lo: str, hi: str) -> List[Any]:
-        conditions = base_conditions + ["delivery_date >= %s", "delivery_date <= %s"]
+        conditions = list(base_conditions) + ["delivery_date >= %s", "delivery_date <= %s"]
         params = base_params + [lo, hi]
         sql = f"""
             SELECT
@@ -636,7 +645,7 @@ def query_ai_purchase_quantity(
                 DATE(delivery_date) AS dday,
                 SUM(truck_count) AS tc
             FROM pd_allocation_predictions
-            WHERE {' AND '.join(conditions)}
+            WHERE {' AND '.join(conditions) if conditions else '1=1'}
             GROUP BY {wh_expr}, contract_no, smelter_company, DATE(delivery_date)
             ORDER BY wh, contract_no, smelter_company, dday
         """
@@ -655,7 +664,7 @@ def query_ai_purchase_quantity(
         bound_sql = f"""
             SELECT MIN(delivery_date), MAX(delivery_date)
             FROM pd_allocation_predictions
-            WHERE {' AND '.join(base_conditions)}
+            WHERE {' AND '.join(base_conditions) if base_conditions else '1=1'}
         """
         try:
             with get_conn() as conn:
@@ -685,8 +694,15 @@ def query_ai_purchase_quantity(
             return {
                 "success": True,
                 "message": (
-                    f"预测快照({latest_pd_str})内发货日为 {dmin.isoformat()}～{dmax.isoformat()}，"
-                    f"与查询区间 {sd}～{ed} 无交集；请将起止日期包含该区间后重试"
+                    (
+                        f"预测快照({latest_pd_str})内发货日为 {dmin.isoformat()}～{dmax.isoformat()}，"
+                        f"与查询区间 {sd}～{ed} 无交集；请将起止日期包含该区间后重试"
+                    )
+                    if latest_pd_str
+                    else (
+                        f"表中发货日为 {dmin.isoformat()}～{dmax.isoformat()}，"
+                        f"与查询区间 {sd}～{ed} 无交集；请将起止日期包含该区间后重试"
+                    )
                 ),
                 "data": {
                     "warehouse_options": warehouse_options,
@@ -729,7 +745,7 @@ def query_ai_purchase_quantity(
             d_str = str(d_day)[:10]
         plan.setdefault(w_h, {}).setdefault(c_n, {}).setdefault(s_m, {})[d_str] = int(t_c or 0)
 
-    # 统一输出：每个「仓库→合同→冶炼厂」下，请求区间内每日均有键，无数据为 0
+    # 统一输出：每个「仓库→合同→冶炼厂」下，请求区间内每日均有键；先按快照填实数
     date_keys = _date_range(sd, ed)
     for contracts in plan.values():
         for smelters in contracts.values():
@@ -738,6 +754,19 @@ def query_ai_purchase_quantity(
                 smelters[sm_key] = {
                     dk: int(day_map.get(dk, 0) or 0) for dk in date_keys
                 }
+
+    # 图表：每条曲线在请求区间内按总量整数均分到每日（不间断、每日有键，总和不变）
+    n_days = len(date_keys)
+    if n_days > 0:
+        for contracts in plan.values():
+            for smelters in contracts.values():
+                for sm_key in list(smelters.keys()):
+                    day_map = smelters[sm_key]
+                    total_trucks = sum(int(day_map.get(dk, 0) or 0) for dk in date_keys)
+                    spread = _spread_integer_total(total_trucks, n_days)
+                    smelters[sm_key] = {
+                        dk: int(spread[i]) for i, dk in enumerate(date_keys)
+                    }
 
     return {
         "success": True,
@@ -798,6 +827,111 @@ def _intersect_dates(dates_a: List[str], dates_b: List[str]) -> List[str]:
 # 核心求解函数
 # ─────────────────────────────────────────────────────────
 
+def _solve_dispatch_lp(
+    active_units: List[Tuple[ContractDemand, List[str]]],
+    warehouses: List[str],
+    daily_cap: Dict[str, Optional[int]],
+    window_dates: List[str],
+    solver_msg: bool,
+    uniform_daily: bool,
+) -> Tuple[Dict[str, Dict[str, Dict[str, int]]], str]:
+    """
+    uniform_daily=True：每个合同在有效日内「各天总车数（跨仓库求和）」固定为
+    `_spread_integer_total(total, 天数)`，保证整数意义下尽可能均匀。
+    uniform_daily=False：原模型，以松弛变量最小化与日均的偏差（在产能等约束下过紧时可解）。
+    """
+    tag = "u" if uniform_daily else "s"
+    prob = pulp.LpProblem(f"dispatch_plan_{tag}", pulp.LpMinimize)
+
+    x: Dict[Tuple[str, str, str], pulp.LpVariable] = {}
+    for c, vd in active_units:
+        for w in warehouses:
+            for d in vd:
+                key = (w, c.contract_no, d)
+                x[key] = pulp.LpVariable(
+                    f"x_{tag}_{w}_{c.contract_no}_{d}",
+                    lowBound=0,
+                    cat="Integer",
+                )
+
+    for c, vd in active_units:
+        prob += (
+            pulp.lpSum(x[(w, c.contract_no, d)] for w in warehouses for d in vd)
+            == c.total_trucks,
+            f"demand_{tag}_{c.contract_no}",
+        )
+
+    for w in warehouses:
+        cap = daily_cap.get(w)
+        if cap is None:
+            continue
+        for d in window_dates:
+            active_on_day = [
+                x[(w, c.contract_no, d)]
+                for c, vd in active_units
+                if d in vd
+            ]
+            if active_on_day:
+                prob += (
+                    pulp.lpSum(active_on_day) <= cap,
+                    f"cap_{tag}_{w}_{d}",
+                )
+
+    if uniform_daily:
+        for c, vd in active_units:
+            spread = _spread_integer_total(c.total_trucks, len(vd))
+            for idx, d in enumerate(vd):
+                prob += (
+                    pulp.lpSum(x[(w, c.contract_no, d)] for w in warehouses)
+                    == spread[idx],
+                    f"uniform_{tag}_{c.contract_no}_{d}",
+                )
+        prob += 0
+    else:
+        dev_plus: Dict[Tuple[str, str], pulp.LpVariable] = {}
+        dev_minus: Dict[Tuple[str, str], pulp.LpVariable] = {}
+        for c, vd in active_units:
+            for d in vd:
+                dev_plus[(c.contract_no, d)] = pulp.LpVariable(
+                    f"dp_{tag}_{c.contract_no}_{d}", lowBound=0
+                )
+                dev_minus[(c.contract_no, d)] = pulp.LpVariable(
+                    f"dm_{tag}_{c.contract_no}_{d}", lowBound=0
+                )
+        prob += pulp.lpSum(
+            dev_plus[(c.contract_no, d)] + dev_minus[(c.contract_no, d)]
+            for c, vd in active_units
+            for d in vd
+        )
+        for c, vd in active_units:
+            n_days = len(vd)
+            target = c.total_trucks / n_days
+            for d in vd:
+                daily_total = pulp.lpSum(x[(w, c.contract_no, d)] for w in warehouses)
+                prob += (
+                    daily_total - target
+                    == dev_plus[(c.contract_no, d)] - dev_minus[(c.contract_no, d)],
+                    f"dev_{tag}_{c.contract_no}_{d}",
+                )
+
+    solver = pulp.PULP_CBC_CMD(msg=1 if solver_msg else 0)
+    prob.solve(solver)
+    status = pulp.LpStatus[prob.status]
+
+    if status not in ("Optimal", "Feasible"):
+        return {}, status
+
+    plan: Dict[str, Dict[str, Dict[str, int]]] = {}
+    for (w, cno, d), var in x.items():
+        val = int(round(var.varValue or 0))
+        if val <= 0:
+            continue
+        smelter = next(c.smelter for c, _ in active_units if c.contract_no == cno)
+        plan.setdefault(w, {}).setdefault(cno, {}).setdefault(smelter, {})[d] = val
+
+    return plan, status
+
+
 def solve_dispatch_plan(
     contracts: List[ContractDemand],
     warehouses: List[str],
@@ -808,6 +942,9 @@ def solve_dispatch_plan(
 ) -> Tuple[Dict[str, Dict[str, Dict[str, int]]], str]:
     """
     求解均匀到货调度计划。
+
+    优先使每个合同在规划有效日内「每日总车数（所有仓库相加）」为整数均分；
+    若与仓库日产能上限冲突导致无解，则回退为原「最小化与日均偏差」模型。
 
     参数：
         contracts    : 合同需求列表
@@ -839,97 +976,25 @@ def solve_dispatch_plan(
     if not active_units:
         return {}, "NoActiveContracts"
 
-    prob = pulp.LpProblem("dispatch_plan", pulp.LpMinimize)
-
-    # ── 决策变量 x[w, cid, d] ──
-    x: Dict[Tuple[str, str, str], pulp.LpVariable] = {}
-    for c, vd in active_units:
-        for w in warehouses:
-            for d in vd:
-                key = (w, c.contract_no, d)
-                x[key] = pulp.LpVariable(
-                    f"x_{w}_{c.contract_no}_{d}", lowBound=0, cat="Integer"
-                )
-
-    # ── 松弛变量（均匀偏差） dev_plus / dev_minus[cid, d] ──
-    dev_plus:  Dict[Tuple[str, str], pulp.LpVariable] = {}
-    dev_minus: Dict[Tuple[str, str], pulp.LpVariable] = {}
-    for c, vd in active_units:
-        for d in vd:
-            dev_plus[(c.contract_no, d)]  = pulp.LpVariable(
-                f"dp_{c.contract_no}_{d}", lowBound=0
-            )
-            dev_minus[(c.contract_no, d)] = pulp.LpVariable(
-                f"dm_{c.contract_no}_{d}", lowBound=0
-            )
-
-    # ── 目标：最小化总偏差（均匀到货） ──
-    prob += pulp.lpSum(
-        dev_plus[(c.contract_no, d)] + dev_minus[(c.contract_no, d)]
-        for c, vd in active_units
-        for d in vd
+    plan, status = _solve_dispatch_lp(
+        active_units,
+        warehouses,
+        daily_cap,
+        window_dates,
+        solver_msg,
+        uniform_daily=True,
     )
+    if status in ("Optimal", "Feasible"):
+        return plan, status
 
-    # ── 约束 1：每个合同在窗口内的发货总量 == 合同需求车数 ──
-    #    （若仓库产能不足，此处改为 <= 并接受欠发；若希望强制完成则保留 ==）
-    for c, vd in active_units:
-        prob += (
-            pulp.lpSum(x[(w, c.contract_no, d)] for w in warehouses for d in vd)
-            == c.total_trucks,
-            f"demand_{c.contract_no}",
-        )
-
-    # ── 约束 2：仓库每日总发货 <= 产能上限（None 表示不封顶，不添加约束）──
-    for w in warehouses:
-        cap = daily_cap.get(w)
-        if cap is None:
-            continue
-        for d in window_dates:
-            # 当天该仓库有哪些合同可发
-            active_on_day = [
-                x[(w, c.contract_no, d)]
-                for c, vd in active_units
-                if d in vd
-            ]
-            if active_on_day:
-                prob += (
-                    pulp.lpSum(active_on_day) <= cap,
-                    f"cap_{w}_{d}",
-                )
-
-    # ── 约束 3：均匀偏差定义 ──
-    #    每合同每天实际发货（所有仓库之和）与均匀目标的偏差
-    for c, vd in active_units:
-        n_days = len(vd)
-        # 均匀目标：总需求 / 有效天数（允许是小数，偏差松弛处理）
-        target = c.total_trucks / n_days
-        for d in vd:
-            daily_total = pulp.lpSum(x[(w, c.contract_no, d)] for w in warehouses)
-            prob += (
-                daily_total - target == dev_plus[(c.contract_no, d)] - dev_minus[(c.contract_no, d)],
-                f"dev_{c.contract_no}_{d}",
-            )
-
-    # ── 求解 ──
-    solver = pulp.PULP_CBC_CMD(msg=1 if solver_msg else 0)
-    prob.solve(solver)
-    status = pulp.LpStatus[prob.status]
-
-    if status not in ("Optimal", "Feasible"):
-        return {}, status
-
-    # ── 提取结果 ──
-    plan: Dict[str, Dict[str, Dict[str, int]]] = {}
-    for (w, cno, d), var in x.items():
-        val = int(round(var.varValue or 0))
-        if val <= 0:
-            continue
-        # 找回 smelter 名称
-        smelter = next(c.smelter for c, _ in active_units if c.contract_no == cno)
-        # 输出格式: {仓库: {合同编号: {冶炼厂: {日期: 车数}}}}
-        plan.setdefault(w, {}).setdefault(cno, {}).setdefault(smelter, {})[d] = val
-
-    return plan, status
+    return _solve_dispatch_lp(
+        active_units,
+        warehouses,
+        daily_cap,
+        window_dates,
+        solver_msg,
+        uniform_daily=False,
+    )
 
 
 # ─────────────────────────────────────────────────────────
