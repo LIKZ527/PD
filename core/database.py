@@ -32,3 +32,14 @@ def get_conn():
         yield connection
     finally:
         connection.close()
+
+
+@contextmanager
+def get_conn_tuple():
+    """与 DictCursor 的 get_conn 并列：TL 比价迁移代码使用元组游标（row[0] 等）。"""
+    config = {k: v for k, v in _get_db_config().items() if k != "cursorclass"}
+    connection = pymysql.connect(**config)
+    try:
+        yield connection
+    finally:
+        connection.close()
