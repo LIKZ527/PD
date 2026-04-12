@@ -7,7 +7,7 @@ from fastapi.security import HTTPBearer
 from core.database import get_conn
 from core.logging import get_logger
 from core.table_access import build_dynamic_select
-from core.auth import create_access_token, get_current_user
+from core.auth import access_token_ttl_seconds, create_access_token, get_current_user
 from pymysql.cursors import DictCursor  
 from services.pd_auth_service import (
     AuthService, 
@@ -164,7 +164,7 @@ def login(body: LoginReq):
         return LoginResp(
             uid=user["id"],
             token=token,
-            expires_in=3600 * 24,  # 24小时
+            expires_in=access_token_ttl_seconds(),
             user={
                 "id": user["id"],
                 "name": user["name"],
@@ -201,7 +201,7 @@ def refresh_token(current_user: dict = Depends(get_current_user)):
     )
     return {
         "token": new_token,
-        "expires_in": 3600 * 24
+        "expires_in": access_token_ttl_seconds(),
     }
 
 

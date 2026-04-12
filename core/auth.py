@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
@@ -8,12 +9,23 @@ from app.core.config import settings
 from core.database import get_conn
 
 
+def access_token_ttl_seconds() -> int:
+    raw = os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440").strip()
+    try:
+        minutes = int(raw)
+    except ValueError:
+        minutes = 1440
+    return max(60, minutes * 60)
+
+
 def create_access_token(
     user_id: int,
     role: str,
     token_type: str = "pd_auth",
-    expires_in_seconds: int = 3600 * 24,
+    expires_in_seconds: Optional[int] = None,
 ) -> str:
+    if expires_in_seconds is None:
+        expires_in_seconds = access_token_ttl_seconds()
     now = datetime.now(timezone.utc)
     payload: Dict[str, Any] = {
         "uid": user_id,
