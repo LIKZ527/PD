@@ -13,7 +13,9 @@ from fastapi.testclient import TestClient
 from app.intelligent_prediction.api.deps import get_prediction_db_session, get_prediction_service_dep
 from app.intelligent_prediction.schemas.prediction import (
     BatchPredictionRequest,
+    HorizonPreset,
     PredictionItem,
+    PredictionRequest,
     PredictionResultSchema,
 )
 from app.intelligent_prediction.services.prediction_service import PredictionService
@@ -76,6 +78,16 @@ def ip_client() -> TestClient:
         yield c
     app.dependency_overrides.pop(get_prediction_db_session, None)
     app.dependency_overrides.pop(get_prediction_service_dep, None)
+
+
+def test_prediction_request_horizon_preset_overrides_days() -> None:
+    req = PredictionRequest(
+        warehouse="A",
+        product_variety="B",
+        horizon_days=7,
+        horizon_preset=HorizonPreset.THREE_MONTHS,
+    )
+    assert req.horizon_days == 90
 
 
 def test_predict_sync_with_override(ip_client: TestClient) -> None:

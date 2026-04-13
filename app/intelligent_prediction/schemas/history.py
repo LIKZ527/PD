@@ -56,6 +56,27 @@ class HistoryTemplateFieldsResponse(BaseModel):
     header_to_field: dict[str, str] = Field(..., description="表头到内部字段名（如 smelter）")
 
 
+class DeliveryRecordUpdate(BaseModel):
+    """单条送货历史更新（全部可选，至少改一项）。"""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    regional_manager: Optional[str] = Field(default=None, max_length=255)
+    smelter: Optional[str] = Field(default=None, max_length=100)
+    warehouse: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    delivery_date: Optional[date] = None
+    product_variety: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    weight: Optional[Decimal] = Field(default=None, ge=0)
+
+    @field_validator("smelter", mode="before")
+    @classmethod
+    def empty_smelter_none(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+
 class HistoryBatchDeleteRequest(BaseModel):
     """批量删除请求。"""
 
@@ -112,3 +133,23 @@ class HistoryQueryParams(BaseModel):
                     out.append(s)
             return out
         return []
+
+
+class HistoryStatsBucket(BaseModel):
+    """按维度聚合的一行。"""
+
+    key: str = Field(..., description="维度取值，如仓库名")
+    record_count: int = Field(..., ge=0)
+    total_weight: Decimal = Field(..., ge=0)
+
+
+class HistoryStatsResponse(BaseModel):
+    """送货历史统计分析（在筛选范围内）。"""
+
+    total_records: int = Field(..., ge=0)
+    total_weight: Decimal = Field(..., ge=0)
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    by_warehouse: list[HistoryStatsBucket] = Field(default_factory=list)
+    by_product_variety: list[HistoryStatsBucket] = Field(default_factory=list)
+    by_regional_manager: list[HistoryStatsBucket] = Field(default_factory=list)

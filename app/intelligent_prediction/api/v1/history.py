@@ -17,10 +17,13 @@ from app.core.logging import get_logger
 from app.intelligent_prediction.api.audit_deps import AuditActor, get_audit_actor
 from app.intelligent_prediction.api.deps import get_history_service_dep, get_prediction_db_session
 from app.intelligent_prediction.schemas.history import (
+    DeliveryRecordRead,
+    DeliveryRecordUpdate,
     HistoryBatchDeleteRequest,
     HistoryImportResponse,
     HistoryListResponse,
     HistoryQueryParams,
+    HistoryStatsResponse,
     HistoryTemplateFieldsResponse,
 )
 from app.intelligent_prediction.services.audit_service import append_audit, write_audit_standalone
@@ -34,7 +37,7 @@ router = APIRouter()
     "/模板/fields",
     response_model=HistoryTemplateFieldsResponse,
     summary="导入模板列定义（JSON）",
-    description="返回模板表头顺序及与内部字段映射，含「冶炼厂」；与 GET /送货历史/模板 下载的 xlsx 表头一致。",
+    description="返回模板表头顺序及与内部字段映射，含「冶炼厂」；导入时「到货日期」列名会映射为送货日期；与 GET /送货历史/模板 下载的 xlsx 表头一致。",
 )
 async def history_template_fields() -> HistoryTemplateFieldsResponse:
     return HistoryTemplateFieldsResponse(
@@ -46,7 +49,7 @@ async def history_template_fields() -> HistoryTemplateFieldsResponse:
 @router.get(
     "/模板",
     summary="下载送货历史导入模板",
-    description="返回标准 xlsx 模板；表头含：大区经理、冶炼厂、仓库、送货日期、品种、重量。",
+    description="返回标准 xlsx 模板；表头含：大区经理、冶炼厂、仓库、送货日期（导入亦支持「到货日期」列名）、品种、重量。",
 )
 async def download_history_template() -> StreamingResponse:
     """标准导入模板（表头与 PRD 一致）。"""
@@ -67,12 +70,6 @@ async def download_history_template() -> StreamingResponse:
     )
 
 
-@router.post(
-    "/导入",
-    response_model=HistoryImportResponse,
-    summary="导入送货历史 Excel",
-    description="上传 xlsx，校验后批量写入送货历史表。",
-)
 @router.get("/template.csv")
 async def download_history_template_csv() -> StreamingResponse:
     """与 xlsx 模板相同表头的 CSV（UTF-8 BOM，便于 Excel 直接打开）。"""
@@ -92,6 +89,12 @@ async def download_history_template_csv() -> StreamingResponse:
     )
 
 
+@router.post(
+    "/导入",
+    response_model=HistoryImportResponse,
+    summary="导入送货历史 Excel",
+    description="上传 xlsx/csv，校验后批量写入送货历史表。",
+)
 @router.post("/import", response_model=HistoryImportResponse)
 async def import_history_excel(
     request: Request,
@@ -135,6 +138,86 @@ async def import_history_excel(
             detail={"error": str(e)},
             actor=actor,
         )
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get(
+    "/统计",
+    response_model=HistoryStatsResponse,
+    summary="送货历史统计分析",
+    description="在筛选条件下汇总总条数、总重量，并按仓库、品种、大区经理聚合（各最多 200 条，按重量降序）。",
+)
+async def history_statistics(
+    regional_manager: Optional[str] = Query(None, description="区域经理（单值）"),
+    regional_managers: list[str] = Query(default=[], description="区域经理（多值）"),
+    smelter: Optional[str] = Query(None, description="冶炼厂（单值）"),
+    smelters: list[str] = Query(default=[], description="冶炼厂（多值）"),
+    warehouse: Optional[str] = Query(None, description="仓库（单值）"),
+    warehouses: list[str] = Query(default=[], description="仓库（多值）"),
+    product_variety: Optional[str] = Query(None, description="品种（单值）"),
+    product_varieties: list[str] = Query(default=[], description="品种（多值）"),
+    date_from: Optional[date] = Query(None, description="送货日期起（含）"),
+    date_to: Optional[date] = Query(None, description="送货日期止（含）"),
+    top_n: int = Query(200, ge=1, le=500, description="各维度聚合返回的最大行数"),
+    session: AsyncSession = Depends(get_prediction_db_session),
+    svc: HistoryService = Depends(get_history_service_dep),
+) -> HistoryStatsResponse:
+    q = HistoryQueryParams(
+        page=1,
+        page_size=1,
+        regional_manager=regional_manager,
+        warehouse=warehouse,
+        product_variety=product_variety,
+        regional_managers=regional_managers,
+        smelter=smelter,
+        smelters=smelters,
+        warehouses=warehouses,
+        product_varieties=product_varieties,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    try:
+        return await svc.statistics(session, q, top_n=top_n)
+    except BusinessException:
+        raise
+    except Exception as e:
+        logger.exception("history_statistics failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.put(
+    "/{record_id}",
+    response_model=DeliveryRecordRead,
+    summary="更新单条送货历史",
+    description="按主键更新大区经理、冶炼厂、仓库、送货日期、品种、重量等字段；请求体至少包含一项。",
+)
+async def update_history_record(
+    record_id: int,
+    body: DeliveryRecordUpdate,
+    session: AsyncSession = Depends(get_prediction_db_session),
+    svc: HistoryService = Depends(get_history_service_dep),
+    actor: AuditActor = Depends(get_audit_actor),
+) -> DeliveryRecordRead:
+    try:
+        row = await svc.update_record(session, record_id, body)
+        if row is None:
+            raise HTTPException(status_code=404, detail="记录不存在")
+        await append_audit(
+            session,
+            "history_update",
+            resource=str(record_id),
+            detail={"fields": list(body.model_dump(exclude_unset=True).keys())},
+            actor=actor,
+        )
+        return row
+    except ValidationBusinessException:
+        raise
+    except BusinessException:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("update_history_record failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 

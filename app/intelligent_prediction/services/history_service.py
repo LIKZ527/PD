@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 
 import pandas as pd
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ValidationBusinessException
@@ -17,10 +17,13 @@ from app.core.logging import get_logger
 from app.intelligent_prediction.models import DeliveryRecord
 from app.intelligent_prediction.schemas.history import (
     DeliveryRecordRead,
+    DeliveryRecordUpdate,
     HistoryImportResponse,
     HistoryImportRowError,
     HistoryListResponse,
     HistoryQueryParams,
+    HistoryStatsBucket,
+    HistoryStatsResponse,
 )
 
 logger = get_logger(__name__)
@@ -61,6 +64,10 @@ class HistoryService:
         "送貨日期": "送货日期",
         "Delivery Date": "送货日期",
         "delivery_date": "送货日期",
+        "到货日期": "送货日期",
+        "到貨日期": "送货日期",
+        "Arrival Date": "送货日期",
+        "arrival_date": "送货日期",
         "品种": "品种",
         "品種": "品种",
         "Product Variety": "品种",
@@ -322,6 +329,116 @@ class HistoryService:
         rows = res.scalars().all()
         items = [DeliveryRecordRead.model_validate(r, from_attributes=True) for r in rows]
         return HistoryListResponse(total=total, page=q.page, page_size=q.page_size, items=items)
+
+    def _history_filter_clauses(self, q: HistoryQueryParams) -> list[Any]:
+        """与 list_records 相同的筛选条件（不含分页）。"""
+        clauses: list[Any] = []
+        rms = list(q.regional_managers)
+        if not rms and q.regional_manager:
+            rms = [q.regional_manager]
+        if rms:
+            clauses.append(DeliveryRecord.regional_manager.in_(rms))
+
+        whs = list(q.warehouses)
+        if not whs and q.warehouse:
+            whs = [q.warehouse]
+        if whs:
+            clauses.append(DeliveryRecord.warehouse.in_(whs))
+
+        vars_ = list(q.product_varieties)
+        if not vars_ and q.product_variety:
+            vars_ = [q.product_variety]
+        if vars_:
+            clauses.append(DeliveryRecord.product_variety.in_(vars_))
+
+        sms = list(q.smelters)
+        if not sms and q.smelter:
+            sms = [q.smelter]
+        if sms:
+            clauses.append(DeliveryRecord.smelter.in_(sms))
+
+        if q.date_from:
+            clauses.append(DeliveryRecord.delivery_date >= q.date_from)
+        if q.date_to:
+            clauses.append(DeliveryRecord.delivery_date <= q.date_to)
+        return clauses
+
+    async def statistics(
+        self,
+        session: AsyncSession,
+        q: HistoryQueryParams,
+        *,
+        top_n: int = 200,
+    ) -> HistoryStatsResponse:
+        clauses = self._history_filter_clauses(q)
+        wc = and_(*clauses) if clauses else True
+
+        cnt_stmt = select(func.count(DeliveryRecord.id)).where(wc)
+        sum_stmt = select(func.coalesce(func.sum(DeliveryRecord.weight), 0)).where(wc)
+        total = int((await session.execute(cnt_stmt)).scalar_one() or 0)
+        tw = (await session.execute(sum_stmt)).scalar_one()
+        total_weight = Decimal(str(tw)) if tw is not None else Decimal("0")
+
+        async def _bucket_rows(key_col: Any) -> list[HistoryStatsBucket]:
+            stmt = (
+                select(
+                    key_col,
+                    func.count(DeliveryRecord.id),
+                    func.coalesce(func.sum(DeliveryRecord.weight), 0),
+                )
+                .where(wc)
+                .group_by(key_col)
+                .order_by(desc(func.coalesce(func.sum(DeliveryRecord.weight), 0)))
+                .limit(top_n)
+            )
+            res = await session.execute(stmt)
+            out: list[HistoryStatsBucket] = []
+            for label, c, w in res.all():
+                out.append(
+                    HistoryStatsBucket(
+                        key=str(label),
+                        record_count=int(c or 0),
+                        total_weight=Decimal(str(w or 0)),
+                    )
+                )
+            return out
+
+        by_wh = await _bucket_rows(DeliveryRecord.warehouse)
+        by_var = await _bucket_rows(DeliveryRecord.product_variety)
+        by_rm = await _bucket_rows(DeliveryRecord.regional_manager)
+        return HistoryStatsResponse(
+            total_records=total,
+            total_weight=total_weight,
+            date_from=q.date_from,
+            date_to=q.date_to,
+            by_warehouse=by_wh,
+            by_product_variety=by_var,
+            by_regional_manager=by_rm,
+        )
+
+    async def update_record(
+        self,
+        session: AsyncSession,
+        record_id: int,
+        payload: DeliveryRecordUpdate,
+    ) -> DeliveryRecordRead | None:
+        patch = payload.model_dump(exclude_unset=True)
+        if not patch:
+            raise ValidationBusinessException("未提供任何可更新字段")
+        stmt = select(DeliveryRecord).where(DeliveryRecord.id == record_id)
+        row = (await session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        if "regional_manager" in patch and not str(patch["regional_manager"]).strip():
+            raise ValidationBusinessException("大区经理不可为空")
+        if "warehouse" in patch and not str(patch["warehouse"]).strip():
+            raise ValidationBusinessException("仓库不可为空")
+        if "product_variety" in patch and not str(patch["product_variety"]).strip():
+            raise ValidationBusinessException("品种不可为空")
+        for k, v in patch.items():
+            setattr(row, k, v)
+        await session.flush()
+        return DeliveryRecordRead.model_validate(row, from_attributes=True)
 
     async def batch_delete(self, session: AsyncSession, ids: list[int]) -> int:
         if not ids:
