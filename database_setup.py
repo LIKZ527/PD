@@ -1023,6 +1023,55 @@ def ensure_pd_user_permissions_columns():
 		connection.close()
 
 
+def ensure_pd_users_role_check():
+	"""
+	旧库 pd_users 上 role 的 CHECK（如 pd_users_chk_1）可能缺少「审核主管」等枚举，
+	创建用户时会报 3819。统一为与代码 UserRole 一致的六种角色，并固定约束名为 pd_users_role_chk。
+	"""
+	allowed = ("管理员", "大区经理", "自营库管理", "财务", "会计", "审核主管")
+	in_sql = ", ".join("'" + r.replace("'", "''") + "'" for r in allowed)
+	config = get_mysql_config()
+	connection = pymysql.connect(**config)
+	try:
+		with connection.cursor() as cursor:
+			cursor.execute("SHOW TABLES LIKE 'pd_users'")
+			if cursor.fetchone() is None:
+				return
+			cursor.execute(
+				"""
+				SELECT 1 FROM information_schema.TABLE_CONSTRAINTS
+				WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'pd_users'
+				AND CONSTRAINT_TYPE = 'CHECK' AND CONSTRAINT_NAME = 'pd_users_role_chk'
+				LIMIT 1
+				"""
+			)
+			if cursor.fetchone():
+				return
+			cursor.execute(
+				"""
+				SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
+				WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'pd_users'
+				AND CONSTRAINT_TYPE = 'CHECK'
+				"""
+			)
+			for row in cursor.fetchall():
+				cname = row[0]
+				safe = str(cname).replace("`", "")
+				try:
+					cursor.execute("ALTER TABLE pd_users DROP CHECK `%s`" % safe)
+				except Exception as exc:
+					print(f"pd_users 删除 CHECK `{safe}` 时跳过: {exc}")
+			cursor.execute(
+				"ALTER TABLE pd_users ADD CONSTRAINT pd_users_role_chk CHECK (role IN (%s))" % in_sql
+			)
+			print("pd_users 已对齐 role 的 CHECK 约束（六种角色，含审核主管）")
+		connection.commit()
+	except Exception as exc:
+		print(f"对齐 pd_users.role CHECK 失败（若 MySQL<8.0.16 或无 CHECK 可忽略）: {exc}")
+	finally:
+		connection.close()
+
+
 def ensure_pd_delivery_plans_tonnage_column():
 	"""旧库补全报货计划 planned_tonnage（CREATE IF NOT EXISTS 不会修改已有表）"""
 	config = get_mysql_config()
@@ -1211,6 +1260,10 @@ def create_tables() -> None:
 		ensure_weighbill_audit_columns()
 		ensure_pd_weighbills_upload_status_column()
 		ensure_pd_user_permissions_columns()
+		try:
+			ensure_pd_users_role_check()
+		except Exception as exc:
+			print(f"检查/对齐 pd_users.role CHECK 失败: {exc}")
 		ensure_pd_delivery_plans_tonnage_column()
 		ensure_pd_warehouses_regional_manager_column()
 		ensure_pd_allocation_predictions_regional_manager_column()

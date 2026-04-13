@@ -3,6 +3,7 @@ import re
 from typing import Any, Dict, List, Optional
 from enum import IntEnum
 import json
+import pymysql.err
 from core.database import get_conn
 from core.table_access import build_dynamic_select, _quote_identifier
 from core.logging import get_logger
@@ -215,8 +216,16 @@ class AuthService:
                 placeholders = ",".join(["%s"] * len(vals))
                 
                 sql = f"INSERT INTO {_quote_identifier('pd_users')} ({cols_sql}) VALUES ({placeholders})"
-                cur.execute(sql, tuple(vals))
-                
+                try:
+                    cur.execute(sql, tuple(vals))
+                except pymysql.err.OperationalError as exc:
+                    if exc.args and exc.args[0] == 3819:
+                        raise ValueError(
+                            "角色或数据未通过数据库校验（如 pd_users_chk_1）。"
+                            "请重启后端以执行库迁移对齐角色枚举，或检查 role 是否为六种标准角色之一。"
+                        ) from exc
+                    raise
+
                 user_id = cur.lastrowid
                 conn.commit()
                 
