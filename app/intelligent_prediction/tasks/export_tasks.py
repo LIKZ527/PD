@@ -46,6 +46,7 @@ async def _run_batch_async(batch_id: str) -> None:
                         {
                             "warehouse": pr.warehouse,
                             "product_variety": pr.product_variety,
+                            "smelter": pr.smelter or "",
                             "regional_manager": pr.regional_manager or "",
                             "target_date": it.target_date.isoformat(),
                             "predicted_weight": float(it.predicted_weight),

@@ -161,6 +161,7 @@ class PredictionResultSchema(BaseModel):
 
     warehouse: str
     product_variety: str
+    smelter: Optional[str] = Field(default=None, description="冶炼厂（与请求或历史推断一致）")
     regional_manager: Optional[str] = None
     items: list[PredictionItem]
     provider_used: str = Field(default="unknown", description="实际使用的供应商")
@@ -209,6 +210,7 @@ class StoredPredictionResultItem(BaseModel):
     regional_manager: Optional[str] = None
     warehouse: str
     product_variety: str
+    smelter: Optional[str] = None
     target_date: date
     predicted_weight: Decimal
     confidence: str

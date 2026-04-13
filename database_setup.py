@@ -686,6 +686,7 @@ TABLE_STATEMENTS = [
 		regional_manager VARCHAR(255) DEFAULT NULL COMMENT '大区经理',
 		warehouse VARCHAR(255) NOT NULL COMMENT '仓库',
 		product_variety VARCHAR(255) NOT NULL COMMENT '品种',
+		smelter VARCHAR(100) DEFAULT NULL COMMENT '冶炼厂',
 		target_date DATE NOT NULL COMMENT '预测目标日',
 		predicted_weight DECIMAL(18,4) NOT NULL COMMENT '预测重量',
 		confidence VARCHAR(32) NOT NULL DEFAULT 'medium' COMMENT '信心',
@@ -698,6 +699,7 @@ TABLE_STATEMENTS = [
 		INDEX idx_ip_res_batch (batch_id),
 		INDEX idx_ip_res_warehouse (warehouse),
 		INDEX idx_ip_res_variety (product_variety),
+		INDEX idx_ip_res_smelter (smelter),
 		INDEX idx_ip_res_target_date (target_date),
 		CONSTRAINT fk_ip_res_batch FOREIGN KEY (batch_id) REFERENCES pd_ip_prediction_batches(id) ON DELETE SET NULL
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='智能预测-结果明细';
@@ -1166,6 +1168,35 @@ def migrate_delivery_status_to_audit():
 		connection.close()
 
 
+def ensure_pd_ip_prediction_results_smelter_column():
+	"""旧库为智能预测结果表补全 smelter（冶炼厂）列。"""
+	config = get_mysql_config()
+	connection = pymysql.connect(**config)
+	try:
+		with connection.cursor() as cursor:
+			cursor.execute("SHOW TABLES LIKE 'pd_ip_prediction_results'")
+			if cursor.fetchone() is None:
+				return
+			cursor.execute("SHOW COLUMNS FROM pd_ip_prediction_results LIKE 'smelter'")
+			if cursor.fetchone() is not None:
+				return
+			cursor.execute("""
+				ALTER TABLE pd_ip_prediction_results
+				ADD COLUMN smelter VARCHAR(100) DEFAULT NULL COMMENT '冶炼厂'
+				AFTER product_variety
+			""")
+			try:
+				cursor.execute(
+					"ALTER TABLE pd_ip_prediction_results ADD INDEX idx_ip_res_smelter (smelter)"
+				)
+			except Exception:
+				pass
+			print("pd_ip_prediction_results 已添加 smelter（冶炼厂）列")
+		connection.commit()
+	finally:
+		connection.close()
+
+
 def ensure_pd_ip_delivery_records_smelter_column():
 	"""旧库为智能预测送货历史表补全 smelter（冶炼厂）列。"""
 	config = get_mysql_config()
@@ -1215,6 +1246,7 @@ def create_tables() -> None:
 		ensure_pd_warehouses_regional_manager_column()
 		ensure_pd_allocation_predictions_regional_manager_column()
 		ensure_pd_ip_delivery_records_smelter_column()
+		ensure_pd_ip_prediction_results_smelter_column()
 		migrate_delivery_status_to_audit()
 		try:
 			ensure_tl_quote_details_price_field_sources_column()

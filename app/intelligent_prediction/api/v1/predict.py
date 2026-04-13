@@ -138,13 +138,14 @@ async def predict_async(
     "/结果",
     response_model=StoredPredictionResultListResponse,
     summary="分页查询预测结果",
-    description="查询已落库的预测明细，支持按仓库、品种、区域经理、批次、目标日期筛选。",
+    description="查询已落库的预测明细，支持按仓库、品种、冶炼厂、区域经理、批次、目标日期筛选。",
 )
 async def list_stored_prediction_results(
     page: int = Query(1, ge=1, description="页码，从 1 开始"),
     page_size: int = Query(20, ge=1, le=200, description="每页条数"),
     warehouse: str | None = Query(None, description="仓库（精确匹配）"),
     product_variety: str | None = Query(None, description="品种（精确匹配）"),
+    smelter: str | None = Query(None, description="冶炼厂（精确匹配）"),
     regional_manager: str | None = Query(None, description="区域经理（精确匹配）"),
     batch_id: uuid.UUID | None = Query(None, description="异步批次 UUID"),
     target_date_from: date | None = Query(None, description="预测目标日期起（含）"),
@@ -157,6 +158,8 @@ async def list_stored_prediction_results(
         filters.append(PredictionResultRow.warehouse == warehouse.strip())
     if product_variety and product_variety.strip():
         filters.append(PredictionResultRow.product_variety == product_variety.strip())
+    if smelter and smelter.strip():
+        filters.append(PredictionResultRow.smelter == smelter.strip())
     if regional_manager and regional_manager.strip():
         filters.append(PredictionResultRow.regional_manager == regional_manager.strip())
     if batch_id is not None:

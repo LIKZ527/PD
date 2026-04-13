@@ -44,6 +44,7 @@ class _FakePredictionService(PredictionService):
             PredictionResultSchema(
                 warehouse="WH1",
                 product_variety="VAR1",
+                smelter=None,
                 regional_manager=None,
                 items=[
                     PredictionItem(

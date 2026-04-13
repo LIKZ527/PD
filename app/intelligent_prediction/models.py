@@ -81,6 +81,7 @@ class PredictionResult(Base):
     regional_manager: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     warehouse: Mapped[str] = mapped_column(String(255), index=True)
     product_variety: Mapped[str] = mapped_column(String(255), index=True)
+    smelter: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
     target_date: Mapped[date] = mapped_column(Date, index=True)
     predicted_weight: Mapped[Decimal] = mapped_column(Numeric(18, 4))
     confidence: Mapped[str] = mapped_column(String(32), default="medium")
