@@ -25,6 +25,14 @@ class ConfidenceLevel(str, Enum):
     LOW = "low"
 
 
+class HorizonPreset(str, Enum):
+    """预测跨度预设：填写时覆盖 `horizon_days`（一周 / 一月 / 三月）。"""
+
+    ONE_WEEK = "one_week"
+    ONE_MONTH = "one_month"
+    THREE_MONTHS = "three_months"
+
+
 class PredictionItem(BaseModel):
     """单日预测项。"""
 
@@ -86,6 +94,10 @@ class PredictionRequest(BaseModel):
     warehouse: str = Field(..., min_length=1, max_length=255, description="仓库")
     product_variety: str = Field(..., min_length=1, max_length=255, description="品种")
     horizon_days: int = Field(default=7, ge=1, le=90, description="预测天数")
+    horizon_preset: Optional[HorizonPreset] = Field(
+        default=None,
+        description="可选：one_week=7 天、one_month=30 天、three_months=90 天，覆盖 horizon_days",
+    )
     prediction_start_date: Optional[date] = Field(
         default=None,
         description="预测起始日（含）；未填则使用当日 UTC 日期",
@@ -113,7 +125,14 @@ class PredictionRequest(BaseModel):
 
     @model_validator(mode="after")
     def check_history_or_db(self) -> PredictionRequest:
-        """历史可为空（由服务补齐）；horizon 必须合理。"""
+        """历史可为空（由服务补齐）；可选预设覆盖 horizon_days。"""
+        if self.horizon_preset is not None:
+            preset_days = {
+                HorizonPreset.ONE_WEEK: 7,
+                HorizonPreset.ONE_MONTH: 30,
+                HorizonPreset.THREE_MONTHS: 90,
+            }
+            object.__setattr__(self, "horizon_days", preset_days[self.horizon_preset])
         if self.horizon_days < 1:
             raise ValueError("horizon_days 至少为 1")
         return self

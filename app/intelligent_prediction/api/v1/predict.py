@@ -19,6 +19,7 @@ from app.core.logging import get_logger
 from app.intelligent_prediction.api.deps import get_prediction_db_session, get_prediction_service_dep
 from app.intelligent_prediction.models import PredictionBatch
 from app.intelligent_prediction.models import PredictionResult as PredictionResultRow
+from app.intelligent_prediction.schemas.audit import OperationAuditItem, OperationAuditListResponse
 from app.intelligent_prediction.schemas.prediction import (
     AsyncPredictionAccepted,
     BatchPredictionRequest,
@@ -27,11 +28,46 @@ from app.intelligent_prediction.schemas.prediction import (
     StoredPredictionResultItem,
     StoredPredictionResultListResponse,
 )
+from app.intelligent_prediction.services.audit_service import list_audit_events
 from app.intelligent_prediction.services.prediction_service import PredictionService
 from app.intelligent_prediction.tasks.export_tasks import run_prediction_batch_task
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+@router.get(
+    "/操作审计",
+    response_model=OperationAuditListResponse,
+    summary="分页查询智能预测操作审计",
+    description="追溯导入、删除、导出、单条历史修改、定时预测等操作（何人、何时、何事）。",
+)
+async def list_operation_audit(
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=200, description="每页条数"),
+    action: str | None = Query(None, description="按动作类型精确筛选，如 history_import"),
+    created_from: datetime | None = Query(None, description="创建时间起（含）"),
+    created_to: datetime | None = Query(None, description="创建时间止（含）"),
+    session: AsyncSession = Depends(get_prediction_db_session),
+) -> OperationAuditListResponse:
+    try:
+        rows, total = await list_audit_events(
+            session,
+            page=page,
+            page_size=page_size,
+            action=action,
+            created_from=created_from,
+            created_to=created_to,
+        )
+        items = [OperationAuditItem.model_validate(r, from_attributes=True) for r in rows]
+        return OperationAuditListResponse(
+            total=total, page=page, page_size=page_size, items=items
+        )
+    except BusinessException:
+        raise
+    except Exception as e:
+        logger.exception("list_operation_audit failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post(

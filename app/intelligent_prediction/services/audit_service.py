@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from datetime import datetime
+
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -59,3 +62,36 @@ async def write_audit_standalone(
             await session.commit()
     except Exception:
         logger.warning("write_audit_standalone failed", exc_info=True)
+
+
+async def list_audit_events(
+    session: AsyncSession,
+    *,
+    page: int,
+    page_size: int,
+    action: str | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+) -> tuple[list[OperationAudit], int]:
+    """分页查询操作审计（按创建时间倒序）。"""
+    filters = []
+    if action and action.strip():
+        filters.append(OperationAudit.action == action.strip())
+    if created_from is not None:
+        filters.append(OperationAudit.created_at >= created_from)
+    if created_to is not None:
+        filters.append(OperationAudit.created_at <= created_to)
+
+    count_stmt = select(func.count()).select_from(OperationAudit)
+    stmt = select(OperationAudit)
+    for f in filters:
+        count_stmt = count_stmt.where(f)
+        stmt = stmt.where(f)
+
+    total_res = await session.execute(count_stmt)
+    total = int(total_res.scalar_one())
+    offset = (page - 1) * page_size
+    stmt = stmt.order_by(OperationAudit.created_at.desc(), OperationAudit.id.desc())
+    stmt = stmt.offset(offset).limit(page_size)
+    res = await session.execute(stmt)
+    return list(res.scalars().all()), total

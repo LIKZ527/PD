@@ -39,6 +39,9 @@ from app.api.v1.user.routes import register_pd_auth_routes
 from core.auth import get_user_identity_from_authorization
 from app.services.contract_service import expire_contracts_after_grace
 from app.api.v1.routes.allocation import run_test_prediction
+from app.intelligent_prediction.services.scheduled_prediction import (
+    run_scheduled_intelligent_prediction_sync,
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -74,7 +77,15 @@ async def lifespan(app: FastAPI):
         id="expire_contracts",
         replace_existing=True,
     )
-    # 每日凌晨 1 点：测试预测（run_daily_prediction 可按需改回正式任务）
+    # 正式分配预测（与 allocation 模块一致）：取消注释后启用
+    # scheduler.add_job(
+    #     func=run_daily_prediction,
+    #     trigger=CronTrigger(hour=1, minute=0),
+    #     kwargs={"H": 10},
+    #     id="daily_prediction",
+    #     replace_existing=True,
+    # )
+        # 添加每日测试预测任务（凌晨1点执行）
     scheduler.add_job(
         func=run_test_prediction,
         trigger=CronTrigger(hour=1, minute=0),
@@ -82,6 +93,21 @@ async def lifespan(app: FastAPI):
         id="daily_prediction",
         replace_existing=True,
     )
+    if settings.intelligent_prediction_schedule_enabled:
+        scheduler.add_job(
+            func=run_scheduled_intelligent_prediction_sync,
+            trigger=CronTrigger(
+                hour=settings.intelligent_prediction_schedule_cron_hour,
+                minute=settings.intelligent_prediction_schedule_cron_minute,
+            ),
+            id="intelligent_prediction_schedule",
+            replace_existing=True,
+        )
+        logger.info(
+            "intelligent_prediction schedule enabled: cron %s:%s",
+            settings.intelligent_prediction_schedule_cron_hour,
+            settings.intelligent_prediction_schedule_cron_minute,
+        )
     scheduler.start()
     logger.info("scheduler started")
     try:
