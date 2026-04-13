@@ -43,6 +43,8 @@ def _prd_query(
     warehouse: str | None,
     product_varieties: list[str],
     product_variety: str | None,
+    smelters: list[str],
+    smelter: str | None,
     page: int,
     page_size: int,
 ) -> PrdForecastQuery:
@@ -57,6 +59,7 @@ def _prd_query(
         regional_managers=_merge_list(regional_managers, regional_manager),
         warehouses=_merge_list(warehouses, warehouse),
         product_varieties=_merge_list(product_varieties, product_variety),
+        smelters=_merge_list(smelters, smelter),
         page=page,
         page_size=page_size,
     )
@@ -66,7 +69,7 @@ def _prd_query(
     "/图表",
     response_model=PrdForecastChartResponse,
     summary="送货量预测图表数据",
-    description="按日期区间与筛选条件返回汇总曲线及按区域经理拆分的序列。",
+    description="按日期区间与筛选条件返回汇总曲线及按区域经理拆分的序列；支持按冶炼厂筛选。",
 )
 async def prd_forecast_chart(
     date_from: date | None = Query(None, description="预测区间起点，默认当天"),
@@ -77,6 +80,8 @@ async def prd_forecast_chart(
     warehouses: list[str] = Query(default=[], description="仓库（多值）"),
     product_variety: str | None = Query(None, description="品种（单值）"),
     product_varieties: list[str] = Query(default=[], description="品种（多值）"),
+    smelter: str | None = Query(None, description="冶炼厂（单值）"),
+    smelters: list[str] = Query(default=[], description="冶炼厂（多值）"),
     session: AsyncSession = Depends(get_prediction_db_session),
     svc: PrdForecastService = Depends(get_prd_forecast_service),
 ) -> PrdForecastChartResponse:
@@ -89,6 +94,8 @@ async def prd_forecast_chart(
         warehouse=warehouse,
         product_varieties=product_varieties,
         product_variety=product_variety,
+        smelters=smelters,
+        smelter=smelter,
         page=1,
         page_size=1,
     )
@@ -105,7 +112,7 @@ async def prd_forecast_chart(
     "/明细",
     response_model=PrdForecastDetailResponse,
     summary="送货量预测明细分页",
-    description="返回规则模型计算的逐日、逐仓、逐品种预测明细。",
+    description="返回规则模型计算的逐日、逐仓、逐品种、逐冶炼厂预测明细。",
 )
 async def prd_forecast_detail(
     page: int = Query(1, ge=1, description="页码"),
@@ -118,6 +125,8 @@ async def prd_forecast_detail(
     warehouses: list[str] = Query(default=[], description="仓库（多值）"),
     product_variety: str | None = Query(None, description="品种（单值）"),
     product_varieties: list[str] = Query(default=[], description="品种（多值）"),
+    smelter: str | None = Query(None, description="冶炼厂（单值）"),
+    smelters: list[str] = Query(default=[], description="冶炼厂（多值）"),
     session: AsyncSession = Depends(get_prediction_db_session),
     svc: PrdForecastService = Depends(get_prd_forecast_service),
 ) -> PrdForecastDetailResponse:
@@ -130,6 +139,8 @@ async def prd_forecast_detail(
         warehouse=warehouse,
         product_varieties=product_varieties,
         product_variety=product_variety,
+        smelters=smelters,
+        smelter=smelter,
         page=page,
         page_size=page_size,
     )
@@ -156,6 +167,8 @@ async def prd_forecast_export(
     warehouses: list[str] = Query(default=[], description="仓库（多值）"),
     product_variety: str | None = Query(None, description="品种（单值）"),
     product_varieties: list[str] = Query(default=[], description="品种（多值）"),
+    smelter: str | None = Query(None, description="冶炼厂（单值）"),
+    smelters: list[str] = Query(default=[], description="冶炼厂（多值）"),
     session: AsyncSession = Depends(get_prediction_db_session),
     svc: PrdForecastService = Depends(get_prd_forecast_service),
     actor: AuditActor = Depends(get_audit_actor),
@@ -169,6 +182,8 @@ async def prd_forecast_export(
         warehouse=warehouse,
         product_varieties=product_varieties,
         product_variety=product_variety,
+        smelters=smelters,
+        smelter=smelter,
         page=1,
         page_size=10**9,
     )

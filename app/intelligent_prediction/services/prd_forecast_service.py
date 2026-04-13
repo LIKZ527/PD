@@ -6,6 +6,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Any, Optional
+
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,15 +96,16 @@ class PrdForecastService:
         load_to: date,
         q: PrdForecastQuery,
     ) -> tuple[
-        dict[tuple[str, str, str, date], Decimal],
-        dict[tuple[str, str], str],
+        dict[tuple[str, str, str, Optional[str], date], Decimal],
+        dict[tuple[str, str, str], str],
     ]:
-        """返回 ( (rm,wh,v,d)->sum , (wh,v)->最近一日的大区经理 )。"""
+        """返回 ( (rm,wh,v,smelter,d)->sum , (wh,v,sm_key)->最近一日的大区经理 )；sm_key 空串表示历史无冶炼厂。"""
         stmt = (
             select(
                 DeliveryRecord.regional_manager,
                 DeliveryRecord.warehouse,
                 DeliveryRecord.product_variety,
+                DeliveryRecord.smelter,
                 DeliveryRecord.delivery_date,
                 func.sum(DeliveryRecord.weight).label("tw"),
             )
@@ -116,6 +119,7 @@ class PrdForecastService:
                 DeliveryRecord.regional_manager,
                 DeliveryRecord.warehouse,
                 DeliveryRecord.product_variety,
+                DeliveryRecord.smelter,
                 DeliveryRecord.delivery_date,
             )
         )
@@ -125,33 +129,46 @@ class PrdForecastService:
             stmt = stmt.where(DeliveryRecord.warehouse.in_(q.warehouses))
         if q.product_varieties:
             stmt = stmt.where(DeliveryRecord.product_variety.in_(q.product_varieties))
+        if q.smelters:
+            stmt = stmt.where(DeliveryRecord.smelter.in_(q.smelters))
 
         res = await session.execute(stmt)
-        cell: dict[tuple[str, str, str, date], Decimal] = {}
-        latest: dict[tuple[str, str], tuple[date, str]] = {}
-        for rm, wh, v, d, tw in res.all():
-            key4 = (str(rm), str(wh), str(v), d)
-            cell[key4] = Decimal(tw)
-            k2 = (str(wh), str(v))
-            prev = latest.get(k2)
+        cell: dict[tuple[str, str, str, Optional[str], date], Decimal] = {}
+        latest: dict[tuple[str, str, str], tuple[date, str]] = {}
+        for rm, wh, v, sm, d, tw in res.all():
+            key5 = (str(rm), str(wh), str(v), sm, d)
+            cell[key5] = Decimal(tw)
+            sm_k = str(sm).strip() if sm is not None and str(sm).strip() else ""
+            k3 = (str(wh), str(v), sm_k)
+            prev = latest.get(k3)
             if prev is None or d > prev[0]:
-                latest[k2] = (d, str(rm))
+                latest[k3] = (d, str(rm))
 
         rm_map = {k: v[1] for k, v in latest.items()}
         return cell, rm_map
 
+    @staticmethod
+    def _smelter_key(smelter: Any) -> str:
+        if smelter is None:
+            return ""
+        s = str(smelter).strip()
+        return s
+
     def _build_structures(
         self,
-        cell: dict[tuple[str, str, str, date], Decimal],
-        rm_map: dict[tuple[str, str], str],
+        cell: dict[tuple[str, str, str, Optional[str], date], Decimal],
+        rm_map: dict[tuple[str, str, str], str],
     ) -> tuple[
-        dict[tuple[str, str], dict[date, Decimal]],
+        dict[tuple[str, str, str], dict[date, Decimal]],
         dict[tuple[str, date], Decimal],
     ]:
-        daily_wv: dict[tuple[str, str], dict[date, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+        daily_wv: dict[tuple[str, str, str], dict[date, Decimal]] = defaultdict(
+            lambda: defaultdict(Decimal)
+        )
         daily_wh: dict[tuple[str, date], Decimal] = defaultdict(Decimal)
-        for (_rm, wh, v, d), w in cell.items():
-            daily_wv[(wh, v)][d] += w
+        for (_rm, wh, v, sm, d), w in cell.items():
+            sm_k = self._smelter_key(sm)
+            daily_wv[(wh, v, sm_k)][d] += w
             daily_wh[(wh, d)] += w
         return daily_wv, daily_wh
 
@@ -171,16 +188,16 @@ class PrdForecastService:
             z = [Decimal("0").quantize(Decimal("0.0001"))] * len(dates)
             return [], PrdForecastChartResponse(dates=dates, total_by_date=z, by_regional_manager=[])
 
-        wh_set = {wh for (wh, _) in daily_wv.keys()} or {wh for (wh, _) in rm_map.keys()}
+        wh_set = {wh for (wh, _, _) in daily_wv.keys()} or {wh for (wh, _, _) in rm_map.keys()}
 
         coef_ref_start = ref_end - timedelta(days=119)
         coefs = _weekday_coefs(dict(daily_wh), wh_set, coef_ref_start, ref_end)
 
         detail_rows: list[PrdForecastDetailRow] = []
-        wv_keys = sorted(daily_wv.keys(), key=lambda x: (x[0], x[1]))
-        for wh, v in wv_keys:
-            rm = rm_map.get((wh, v)) or "未分配"
-            series = dict(daily_wv.get((wh, v), {}))
+        wv_keys = sorted(daily_wv.keys(), key=lambda x: (x[0], x[1], x[2]))
+        for wh, v, sm_k in wv_keys:
+            rm = rm_map.get((wh, v, sm_k)) or "未分配"
+            series = dict(daily_wv.get((wh, v, sm_k), {}))
             for d in _daterange_inclusive(q.date_from, q.date_to):
                 wma = _linear_wma(series, d, 30)
                 wd = d.weekday()
@@ -192,6 +209,7 @@ class PrdForecastService:
                         regional_manager=rm,
                         warehouse=wh,
                         product_variety=v,
+                        smelter=sm_k if sm_k else None,
                         wma_base=wma.quantize(Decimal("0.0001")),
                         week_coef=c.quantize(Decimal("0.0001")),
                         predicted_weight=pred,
