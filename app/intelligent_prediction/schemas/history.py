@@ -92,8 +92,8 @@ class HistoryBatchDeleteRequest(BaseModel):
 class HistoryQueryParams(BaseModel):
     """查询参数（由服务层组装）。"""
 
-    page: int = Field(default=1, ge=1)
-    page_size: int = Field(default=20, ge=1, le=200)
+    page: int = Field(default=1, ge=1, le=1_000_000)
+    page_size: int = Field(default=20, ge=1, le=1000)
     regional_manager: Optional[str] = None
     warehouse: Optional[str] = None
     product_variety: Optional[str] = None

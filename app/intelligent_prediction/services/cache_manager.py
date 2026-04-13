@@ -85,7 +85,8 @@ class RedisCache:
         try:
             await self.connect()
             raw = await self.raw.get(key)
-        except redis_exc.RedisError as e:
+        except (redis_exc.RedisError, OSError, TimeoutError) as e:
+            # RedisError：redis 包装后的连接错误；OSError：如 ConnectionRefusedError 未包装时
             logger.warning("Redis 不可用，跳过预测结果读缓存：%s", e)
             await self._reset_client()
             return None
@@ -102,7 +103,7 @@ class RedisCache:
         try:
             await self.connect()
             await self.raw.set(key, json.dumps(value, ensure_ascii=False, default=str), ex=ttl_seconds)
-        except redis_exc.RedisError as e:
+        except (redis_exc.RedisError, OSError, TimeoutError) as e:
             logger.warning("Redis 不可用，跳过预测结果写缓存：%s", e)
             await self._reset_client()
 

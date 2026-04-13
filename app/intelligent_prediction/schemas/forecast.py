@@ -46,8 +46,3 @@ class PrdForecastDetailResponse(BaseModel):
     page: int
     page_size: int
     items: list[PrdForecastDetailRow]
-
-
-class PrdForecastExportMeta(BaseModel):
-    filename: str
-    row_count: int

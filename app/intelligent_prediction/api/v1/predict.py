@@ -10,7 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BusinessException, ServiceUnavailableBusinessException
+from app.core.exceptions import (
+    BusinessException,
+    INTERNAL_SERVER_ERROR_MESSAGE,
+    ServiceUnavailableBusinessException,
+)
 from app.core.logging import get_logger
 from app.intelligent_prediction.api.deps import get_prediction_db_session, get_prediction_service_dep
 from app.intelligent_prediction.models import PredictionBatch
@@ -86,7 +90,7 @@ async def predict_sync(
         raise
     except Exception as e:
         logger.exception("predict_sync failed")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e
 
 
 @router.post(
@@ -131,7 +135,7 @@ async def predict_async(
         raise
     except Exception as e:
         logger.exception("predict_async failed")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e
 
 
 @router.get(
@@ -188,7 +192,7 @@ async def list_stored_prediction_results(
         raise
     except Exception as e:
         logger.exception("list_stored_prediction_results failed")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e
 
 
 @router.get(

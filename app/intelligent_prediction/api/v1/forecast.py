@@ -10,7 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BusinessException, ValidationBusinessException
+from app.core.exceptions import (
+    BusinessException,
+    INTERNAL_SERVER_ERROR_MESSAGE,
+    ValidationBusinessException,
+)
 from app.core.logging import get_logger
 from app.intelligent_prediction.api.audit_deps import AuditActor, get_audit_actor
 from app.intelligent_prediction.api.deps import get_prediction_db_session
@@ -94,7 +98,7 @@ async def prd_forecast_chart(
         raise
     except Exception as e:
         logger.exception("prd_forecast_chart failed")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e
 
 
 @router.get(
@@ -135,7 +139,7 @@ async def prd_forecast_detail(
         raise
     except Exception as e:
         logger.exception("prd_forecast_detail failed")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e
 
 
 @router.get(
@@ -197,4 +201,4 @@ async def prd_forecast_export(
             detail={"error": str(e)},
             actor=actor,
         )
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e

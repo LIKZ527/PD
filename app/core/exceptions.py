@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+# 对外 HTTP 500 统一文案，避免将异常细节返回给客户端（详细栈见日志）
+INTERNAL_SERVER_ERROR_MESSAGE = "服务器内部错误，请稍后重试"
+
 
 class BusinessException(Exception):
     """可预期的业务错误，由 FastAPI 异常处理器转为 JSON。"""

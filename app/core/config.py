@@ -99,6 +99,7 @@ def load_settings() -> "Settings":
         intelligent_prediction_schedule_cron_minute=_env_int(
             "INTELLIGENT_PREDICTION_SCHEDULE_CRON_MINUTE", 30
         ),
+        enable_manual_db_init=_env_bool("ENABLE_MANUAL_DB_INIT", False),
     )
 
 
@@ -133,6 +134,8 @@ class Settings(BaseModel):
     openai_input_price_per_1k: float = 0.005
     openai_output_price_per_1k: float = 0.015
     prediction_prometheus_enabled: bool = False
+    # 为 true 时开放 GET /init-db（默认关闭，避免公网误暴露建表能力）
+    enable_manual_db_init: bool = False
 
     intelligent_prediction_schedule_enabled: bool = False
     intelligent_prediction_schedule_horizon_days: int = 30

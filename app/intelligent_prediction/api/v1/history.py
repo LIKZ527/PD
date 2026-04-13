@@ -12,7 +12,11 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BusinessException, ValidationBusinessException
+from app.core.exceptions import (
+    BusinessException,
+    INTERNAL_SERVER_ERROR_MESSAGE,
+    ValidationBusinessException,
+)
 from app.core.logging import get_logger
 from app.intelligent_prediction.api.audit_deps import AuditActor, get_audit_actor
 from app.intelligent_prediction.api.deps import get_history_service_dep, get_prediction_db_session
@@ -31,6 +35,30 @@ from app.intelligent_prediction.services.history_service import HistoryService
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+def _parse_history_query_date(name: str, raw: Optional[str]) -> Optional[date]:
+    """解析列表查询中的日期：支持 YYYY-MM-DD 或以该格式开头的 ISO 日期时间（前端常带 T00:00:00）。"""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    head = s[:10] if len(s) >= 10 else s
+    try:
+        return date.fromisoformat(head)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=[
+                {
+                    "type": "date_parsing",
+                    "loc": ["query", name],
+                    "msg": "日期须为 YYYY-MM-DD，或为以该日期开头的 ISO 日期时间",
+                    "input": raw,
+                }
+            ],
+        ) from None
 
 
 @router.get(
@@ -93,7 +121,7 @@ async def download_history_template_csv() -> StreamingResponse:
     "/导入",
     response_model=HistoryImportResponse,
     summary="导入送货历史 Excel",
-    description="上传 xlsx/csv，校验后批量写入送货历史表。",
+    description="上传 xlsx，校验后批量写入送货历史表。",
 )
 @router.post("/import", response_model=HistoryImportResponse)
 async def import_history_excel(
@@ -138,7 +166,7 @@ async def import_history_excel(
             detail={"error": str(e)},
             actor=actor,
         )
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e
 
 
 @router.get(
@@ -228,8 +256,8 @@ async def update_history_record(
     description="支持按区域经理、冶炼厂、仓库、品种、送货日期区间筛选。",
 )
 async def list_history(
-    page: int = Query(1, ge=1, description="页码"),
-    page_size: int = Query(20, ge=1, le=200, description="每页条数"),
+    page: int = Query(1, ge=0, le=1_000_000, description="页码（≤0 时按 1 处理）"),
+    page_size: int = Query(20, ge=1, le=10_000, description="每页条数（超过 1000 时按 1000 处理）"),
     regional_manager: Optional[str] = Query(None, description="区域经理（单值）"),
     regional_managers: list[str] = Query(default=[], description="区域经理（多值）"),
     smelter: Optional[str] = Query(None, description="冶炼厂（单值）"),
@@ -238,14 +266,16 @@ async def list_history(
     warehouses: list[str] = Query(default=[], description="仓库（多值）"),
     product_variety: Optional[str] = Query(None, description="品种（单值）"),
     product_varieties: list[str] = Query(default=[], description="品种（多值）"),
-    date_from: Optional[date] = Query(None, description="送货日期起（含）"),
-    date_to: Optional[date] = Query(None, description="送货日期止（含）"),
+    date_from: Optional[str] = Query(None, description="送货日期起（含），YYYY-MM-DD 或 ISO 日期时间"),
+    date_to: Optional[str] = Query(None, description="送货日期止（含），YYYY-MM-DD 或 ISO 日期时间"),
     session: AsyncSession = Depends(get_prediction_db_session),
     svc: HistoryService = Depends(get_history_service_dep),
 ) -> HistoryListResponse:
+    page_adj = max(1, page)
+    page_size_adj = max(1, min(1000, page_size))
     q = HistoryQueryParams(
-        page=page,
-        page_size=page_size,
+        page=page_adj,
+        page_size=page_size_adj,
         regional_manager=regional_manager,
         warehouse=warehouse,
         product_variety=product_variety,
@@ -254,8 +284,8 @@ async def list_history(
         smelters=smelters,
         warehouses=warehouses,
         product_varieties=product_varieties,
-        date_from=date_from,
-        date_to=date_to,
+        date_from=_parse_history_query_date("date_from", date_from),
+        date_to=_parse_history_query_date("date_to", date_to),
     )
     try:
         return await svc.list_records(session, q)
@@ -263,7 +293,7 @@ async def list_history(
         raise
     except Exception as e:
         logger.exception("list_history failed")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e
 
 
 @router.delete(
@@ -290,4 +320,4 @@ async def batch_delete_history(
         raise
     except Exception as e:
         logger.exception("batch_delete failed")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e

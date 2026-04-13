@@ -21,7 +21,7 @@ from app.core.logging import (
 
 setup_logging()
 
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -46,8 +46,11 @@ from app.intelligent_prediction.services.scheduled_prediction import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理 - 启动时初始化数据库"""
-    setup_logging()
     logger = get_logger("app.lifespan")
+    if settings.jwt_secret.strip() in {"", "change-me"}:
+        logger.warning(
+            "JWT_SECRET 未配置或为默认值，生产环境请务必设置强随机密钥并妥善保管"
+        )
     print("正在检查数据库初始化...")
     try:
         create_tables()
@@ -214,12 +217,18 @@ def health_check() -> dict:
 
 @app.get("/init-db")
 def manual_init_db():
-    """手动触发数据库初始化（调试用）"""
+    """手动触发数据库初始化（默认关闭，需设置 ENABLE_MANUAL_DB_INIT=1）。"""
+    if not settings.enable_manual_db_init:
+        raise HTTPException(status_code=404, detail="Not Found")
     try:
         create_tables()
         return {"success": True, "message": "数据库初始化完成"}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        logger.exception("manual_init_db failed")
+        raise HTTPException(
+            status_code=500,
+            detail="数据库初始化失败",
+        ) from e
 
 
 if __name__ == "__main__":
