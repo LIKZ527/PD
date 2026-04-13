@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -92,6 +92,32 @@ class PredictionService:
             smelter=req.smelter,
         )
         return req.model_copy(update={"history": hist})
+
+    async def _resolve_result_smelter(
+        self,
+        session: AsyncSession,
+        req: PredictionRequest,
+    ) -> Optional[str]:
+        """返回展示用冶炼厂：请求已填优先；否则按仓+品种从历史表取出现次数最多的非空冶炼厂。"""
+        if req.smelter and str(req.smelter).strip():
+            return str(req.smelter).strip()
+        stmt = (
+            select(DeliveryRecord.smelter, func.count().label("cnt"))
+            .where(
+                DeliveryRecord.warehouse == req.warehouse,
+                DeliveryRecord.product_variety == req.product_variety,
+                DeliveryRecord.smelter.isnot(None),
+                DeliveryRecord.smelter != "",
+            )
+            .group_by(DeliveryRecord.smelter)
+            .order_by(func.count().desc())
+            .limit(1)
+        )
+        row = (await session.execute(stmt)).first()
+        if row is None or row[0] is None:
+            return None
+        s = str(row[0]).strip()
+        return s or None
 
     def _post_process_items(
         self,
@@ -216,6 +242,7 @@ class PredictionService:
     ) -> PredictionResultSchema:
         """单笔预测：L1 + L2 Redis。"""
         req = await self._ensure_request_history(session, req)
+        resolved_smelter = await self._resolve_result_smelter(session, req)
         start = req.prediction_start_date or self._utc_today()
         logger.info(
             "prediction_request warehouse=%s smelter=%s variety=%s horizon=%s hist_count=%s client_request_id=%s",
@@ -274,6 +301,7 @@ class PredictionService:
         result = PredictionResultSchema(
             warehouse=req.warehouse,
             product_variety=req.product_variety,
+            smelter=resolved_smelter,
             regional_manager=req.regional_manager,
             items=items,
             provider_used=provider,
@@ -323,6 +351,7 @@ class PredictionService:
                         regional_manager=pr.regional_manager,
                         warehouse=pr.warehouse,
                         product_variety=pr.product_variety,
+                        smelter=pr.smelter,
                         target_date=it.target_date,
                         predicted_weight=it.predicted_weight,
                         confidence=str(it.confidence),
