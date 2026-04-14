@@ -7,7 +7,6 @@ import io
 from datetime import date
 from typing import Optional
 
-import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,15 +76,16 @@ async def history_template_fields() -> HistoryTemplateFieldsResponse:
 @router.get(
     "/模板",
     summary="下载送货历史导入模板",
-    description="返回标准 xlsx 模板；表头含：大区经理、冶炼厂、仓库、送货日期（导入亦支持「到货日期」列名）、品种、重量。",
+    description=(
+        "返回标准 xlsx：含「导入数据」（表头 + 可跳过示例行）与「使用说明」；"
+        "表头含大区经理、冶炼厂、仓库、送货日期（导入亦支持「到货日期」列名）、品种、重量；"
+        "大区经理以「(示例)」开头的行导入时自动跳过。"
+    ),
 )
 async def download_history_template() -> StreamingResponse:
-    """标准导入模板（表头与 PRD 一致）。"""
-    cols = HistoryService.import_template_headers()
-    df = pd.DataFrame(columns=cols)
-    buf = io.BytesIO()
-    df.to_excel(buf, index=False, engine="openpyxl")
-    buf.seek(0)
+    """标准导入模板（表头与 PRD 一致，含示例与说明工作表）。"""
+    body = HistoryService.import_template_xlsx_bytes()
+    buf = io.BytesIO(body)
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

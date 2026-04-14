@@ -82,6 +82,83 @@ class HistoryService:
         "weight": "重量",
     }
 
+    #: 下载模板中示例行的大区经理须以此开头；导入时跳过，计入 skipped
+    TEMPLATE_EXAMPLE_RM_PREFIX: ClassVar[str] = "(示例)"
+
+    _TEMPLATE_HEADER_COMMENTS: ClassVar[dict[str, str]] = {
+        "大区经理": (
+            "必填。若值以「(示例)」开头，本行仅为模板示例，导入时自动跳过（不计错误）。"
+        ),
+        "冶炼厂": "选填；填写时长度不超过 100 字符。",
+        "仓库": "必填。",
+        "送货日期": "必填。支持 YYYY-MM-DD、YYYY/M/D；亦支持 Excel 日期或序列号。",
+        "品种": "必填。",
+        "重量": "必填；非负数字，可含小数。",
+    }
+
+    @staticmethod
+    def import_template_xlsx_bytes() -> bytes:
+        """生成含「导入数据」示例行与「使用说明」的 xlsx 模板字节流。"""
+        from openpyxl import Workbook
+        from openpyxl.comments import Comment
+        from openpyxl.styles import Alignment, Font
+
+        wb = Workbook()
+        ws = wb.active
+        assert ws is not None
+        ws.title = "导入数据"
+        cols = HistoryService.import_template_headers()
+        ws.append(cols)
+        for col_idx, name in enumerate(cols, start=1):
+            cell = ws.cell(row=1, column=col_idx)
+            hint = HistoryService._TEMPLATE_HEADER_COMMENTS.get(name)
+            if hint:
+                cell.comment = Comment(hint, "PD")
+            cell.font = Font(bold=True)
+        example_rows: list[tuple[str, str, str, str, str, float]] = [
+            ("(示例)李经理", "金利", "华东一号仓", "2026-01-15", "阴极铜", 12.5),
+            ("(示例)李经理", "", "华东一号仓", "2026/1/16", "A级电解铜", 8.0),
+            ("(示例)王经理", "某冶炼厂", "华南中心库", "2026-01-17", "铝锭", 3.25),
+        ]
+        for r in example_rows:
+            ws.append(list(r))
+        ws.freeze_panes = "A2"
+        for col_letter, width in (
+            ("A", 22),
+            ("B", 12),
+            ("C", 16),
+            ("D", 14),
+            ("E", 14),
+            ("F", 10),
+        ):
+            ws.column_dimensions[col_letter].width = width
+
+        ws_help = wb.create_sheet("使用说明", 1)
+        help_lines = (
+            "送货历史导入 — 使用说明\n\n"
+            "一、工作表\n"
+            "·「导入数据」：系统仅读取此工作表（须为工作簿中的第一个工作表）。请勿修改首行表头文字、顺序或增删列。\n"
+            "·「使用说明」：仅供阅读，导入时不会解析本页。\n\n"
+            "二、字段与格式\n"
+            "·大区经理、仓库、品种、重量、送货日期为必填；冶炼厂选填。\n"
+            "·送货日期：可用 2026-01-15、2026/1/15 等；亦支持 Excel 原生日期单元格或日期序列号。\n"
+            "·重量：非负数字，可含小数。\n\n"
+            "三、示例行\n"
+            "·「导入数据」表中第 2 行起为示例（大区经理以「(示例)」开头）。导入接口会自动跳过这些行并计入 skipped；您也可在导入前自行删除。\n\n"
+            "四、导入结果\n"
+            "·若存在校验错误行，整批拒绝、不会部分写入；请根据接口返回的错误行号修正后重新上传。"
+        )
+        c = ws_help.cell(row=1, column=1, value=help_lines)
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        ws_help.merge_cells("A1:F22")
+        ws_help.row_dimensions[1].height = 320
+        for col_letter in ("A", "B", "C", "D", "E", "F"):
+            ws_help.column_dimensions[col_letter].width = 18
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
     def _normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         rename_map: dict[str, str] = {}
         for c in df.columns:
@@ -232,6 +309,7 @@ class HistoryService:
 
         errors: list[HistoryImportRowError] = []
         to_insert: list[DeliveryRecord] = []
+        skipped = 0
 
         for idx, row in df.iterrows():
             excel_row = int(idx) + 2
@@ -241,6 +319,10 @@ class HistoryService:
             dv = row.get("送货日期")
             variety = row.get("品种")
             wv = row.get("重量")
+
+            if rm is not None and str(rm).strip().startswith(self.TEMPLATE_EXAMPLE_RM_PREFIX):
+                skipped += 1
+                continue
 
             row_errors: list[str] = []
             if rm is None or str(rm).strip() == "":
@@ -297,8 +379,8 @@ class HistoryService:
             session.add(rec)
 
         inserted = len(to_insert)
-        logger.info("history import finished inserted=%s", inserted)
-        return HistoryImportResponse(inserted=inserted, skipped=0, errors=[])
+        logger.info("history import finished inserted=%s skipped=%s", inserted, skipped)
+        return HistoryImportResponse(inserted=inserted, skipped=skipped, errors=[])
 
     async def list_records(
         self,
