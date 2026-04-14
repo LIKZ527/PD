@@ -170,6 +170,33 @@ def _validate_contract_qty_vs_planned_tonnage(
     return None
 
 
+def _validate_delivery_plan_has_approved_order_plan(delivery_plan_id: int) -> Optional[str]:
+    """
+    关联报货计划（pd_delivery_plans）录入合同时：该计划下须至少有一条「审核通过」的订货计划
+    （pd_order_plans）。避免订货计划尚未审核、报货计划已定车数仍为 0 时即可绑定合同。
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM pd_order_plans
+                    WHERE delivery_plan_id = %s AND audit_status = %s
+                    LIMIT 1
+                    """,
+                    (delivery_plan_id, "审核通过"),
+                )
+                if cur.fetchone():
+                    return None
+    except Exception as e:
+        logger.warning("validate delivery plan has approved order plan failed: %s", e)
+        return "校验订货计划审核状态失败，请稍后重试或联系管理员"
+    return (
+        "该报货计划下尚无审核通过的订货计划，无法关联合同；"
+        "请待大区经理订货计划审核通过后再录入。"
+    )
+
+
 # ============ 核心服务 ============
 
 class ContractService:
@@ -701,6 +728,10 @@ class ContractService:
             data["delivery_plan_id"] = pid
             data.pop("plan_no", None)
 
+            ord_plan_err = _validate_delivery_plan_has_approved_order_plan(int(pid))
+            if ord_plan_err:
+                return {"success": False, "error": ord_plan_err}
+
             ton_err = _validate_contract_qty_vs_planned_tonnage(
                 data.get("delivery_plan_id"), data.get("total_quantity")
             )
@@ -798,6 +829,7 @@ class ContractService:
         """更新合同（含图片重命名）"""
         try:
             _ensure_contract_delivery_plan_id_column()
+            delivery_plan_link_updated = "plan_no" in data or "delivery_plan_id" in data
             if "plan_no" in data:
                 raw_pn = data.pop("plan_no")
                 if raw_pn is None or (isinstance(raw_pn, str) and not raw_pn.strip()):
@@ -864,6 +896,13 @@ class ContractService:
                         if "total_quantity" in data
                         else old_total_quantity
                     )
+                    if eff_dpid is not None and delivery_plan_link_updated:
+                        ord_plan_err = _validate_delivery_plan_has_approved_order_plan(
+                            int(eff_dpid)
+                        )
+                        if ord_plan_err:
+                            return {"success": False, "error": ord_plan_err}
+
                     ton_err = _validate_contract_qty_vs_planned_tonnage(eff_dpid, eff_qty)
                     if ton_err:
                         return {"success": False, "error": ton_err}

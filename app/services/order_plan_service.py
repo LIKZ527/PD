@@ -555,6 +555,7 @@ class OrderPlanService:
                             if current_status == AUDIT_STATUS_REJECTED:
                                 update_fields.append("audit_status = %s")
                                 params.append(AUDIT_STATUS_PENDING)
+                                update_fields.append("audit_remark = NULL")
 
                         # 签到时间更新
                         if sign_in_deadline is not None:
@@ -657,7 +658,9 @@ class OrderPlanService:
         operator_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        仅修改车数（仅审核通过/审核未通过可改；不改变审核状态；车数须 ≥1）
+        仅修改车数（仅审核通过/审核未通过可改；车数须 ≥1）
+        审核通过：仅改车数，不改变审核状态。
+        审核未通过：改车数后重置为「待审核」并清空审核备注，以便重新提交审核。
         【新增】不能减少到已报单总量以下
         """
         if truck_count < 1:
@@ -701,11 +704,13 @@ class OrderPlanService:
                         old_truck_count = int(row.get("truck_count") or 0)
                         plan_no_row = (row.get("plan_no") or "").strip()
 
-                        # 仅「待审核/审核通过」计入报货计划车数上限，「审核未通过」不计入
+                        # 「待审核/审核通过」计入上限；「审核未通过」平时不计入，但改车数后将变为待审核，须按新车数计入（与 update_order_plan_fields 一致）
                         include_candidate = current_status in (
                             AUDIT_STATUS_PENDING,
                             AUDIT_STATUS_APPROVED,
                         )
+                        if current_status == AUDIT_STATUS_REJECTED:
+                            include_candidate = True
                         delivery_plan_id = int(row.get("delivery_plan_id"))
                         limit_err = self._validate_truck_limit(
                             cur,
@@ -763,23 +768,45 @@ class OrderPlanService:
                                 conn.rollback()
                                 return {"success": False, "error": str(e)}
 
-                        cur.execute(
-                            """
-                            UPDATE pd_order_plans
-                            SET truck_count = %s,
-                                updated_by = %s,
-                                updated_by_name = %s
-                            WHERE id = %s
-                              AND audit_status = %s
-                            """,
-                            (
-                                truck_count,
-                                operator_id,
-                                operator_name,
-                                order_plan_id,
-                                current_status,
-                            ),
-                        )
+                        if current_status == AUDIT_STATUS_REJECTED:
+                            cur.execute(
+                                """
+                                UPDATE pd_order_plans
+                                SET truck_count = %s,
+                                    updated_by = %s,
+                                    updated_by_name = %s,
+                                    audit_status = %s,
+                                    audit_remark = NULL
+                                WHERE id = %s
+                                  AND audit_status = %s
+                                """,
+                                (
+                                    truck_count,
+                                    operator_id,
+                                    operator_name,
+                                    AUDIT_STATUS_PENDING,
+                                    order_plan_id,
+                                    current_status,
+                                ),
+                            )
+                        else:
+                            cur.execute(
+                                """
+                                UPDATE pd_order_plans
+                                SET truck_count = %s,
+                                    updated_by = %s,
+                                    updated_by_name = %s
+                                WHERE id = %s
+                                  AND audit_status = %s
+                                """,
+                                (
+                                    truck_count,
+                                    operator_id,
+                                    operator_name,
+                                    order_plan_id,
+                                    current_status,
+                                ),
+                            )
                         if cur.rowcount == 0:
                             conn.rollback()
                             return {
@@ -793,9 +820,16 @@ class OrderPlanService:
                         )
                         out = cur.fetchone()
                     conn.commit()
+                    msg = "车数已更新"
+                    if (
+                        current_status == AUDIT_STATUS_REJECTED
+                        and out
+                        and (out.get("audit_status") == AUDIT_STATUS_PENDING)
+                    ):
+                        msg = "车数已更新，已重新进入待审核"
                     return {
                         "success": True,
-                        "message": "车数已更新",
+                        "message": msg,
                         "data": _serialize_row(out) if out else {},
                     }
                 except Exception:

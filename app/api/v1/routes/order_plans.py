@@ -1,5 +1,6 @@
 """
-订货计划：录入、列表筛选、修改车数（仅审核通过/审核未通过可改；改车数不改变审核状态）、审核
+订货计划：录入、列表筛选、修改车数、审核。
+「仅改车数」接口在审核未通过时会重入待审核；审核通过时改车数不改变审核状态。
 """
 from typing import Literal, Optional
 
@@ -230,7 +231,7 @@ async def patch_order_plan(
 
 @router.patch(
     "/{order_plan_id}/truck-count",
-    summary="仅修改车数（仅审核通过/审核未通过可改；不改变审核状态；车数须 ≥1）",
+    summary="仅修改车数（审核通过：不改状态；审核未通过：改后重入待审核；车数须 ≥1）",
     response_model=dict,
 )
 async def patch_order_plan_truck_count(
