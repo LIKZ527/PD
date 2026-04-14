@@ -65,13 +65,15 @@ def _mysql_duplicate_entry_value(err_msg: str) -> Optional[str]:
     return m.group(1) if m else None
 
 _PLAN_AUDIT_COLS_ENSURED = False
+_PLAN_LEGACY_FULLINVALID_REPAIRED = False
 
 
 def _ensure_plan_audit_columns() -> None:
     """旧库补全报货计划操作人相关字段（仅执行一次）。"""
-    global _PLAN_AUDIT_COLS_ENSURED
+    global _PLAN_AUDIT_COLS_ENSURED, _PLAN_LEGACY_FULLINVALID_REPAIRED
     if _PLAN_AUDIT_COLS_ENSURED:
         return
+    repair_legacy_full_invalid = False
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -113,7 +115,27 @@ def _ensure_plan_audit_columns() -> None:
                     )
                 if parts:
                     cur.execute("ALTER TABLE pd_delivery_plans " + ", ".join(parts))
+                # 历史：满额时曾自动将 plan_status 置为「已失效」，与业务期望不符；commit 成功后标记已执行
+                if not _PLAN_LEGACY_FULLINVALID_REPAIRED:
+                    cur.execute(
+                        """
+                        UPDATE pd_delivery_plans
+                        SET plan_status = '生效中'
+                        WHERE plan_status = '已失效'
+                          AND planned_trucks > 0
+                          AND confirmed_trucks >= planned_trucks
+                        """
+                    )
+                    aff = cur.rowcount or 0
+                    if aff:
+                        logger.info(
+                            "pd_delivery_plans: corrected %s rows from mistaken 已失效 (quota full)",
+                            aff,
+                        )
+                    repair_legacy_full_invalid = True
             conn.commit()
+        if repair_legacy_full_invalid:
+            _PLAN_LEGACY_FULLINVALID_REPAIRED = True
         _PLAN_AUDIT_COLS_ENSURED = True
     except Exception as e:
         logger.warning("ensure_plan_audit_columns skipped/failed: %s", e)
@@ -131,7 +153,7 @@ def apply_increment_confirmed_trucks(
     与 increment-confirmed-trucks 接口相同的累加逻辑，在调用方事务内执行（不 commit）。
     confirmed_trucks 可超过 planned_trucks；此时 unconfirmed_trucks 为 0（GREATEST(0, planned - 新已定)）。
     truck_count < 1 时为无副作用的成功（不执行 UPDATE）。
-    累加后若已定车数已满（>= 计划车数且计划车数>0），自动将报货计划 plan_status 置为「已失效」。
+    已定车数已满时仅体现为 unconfirmed_trucks=0，不把 plan_status 改为「已失效」（避免满额后合同仍关联该计划编号却被前端/流程误判为不可用）。
 
     注意：MySQL 单表 UPDATE 中赋值从左到右，后列会读到前列已更新的值。
     必须先写 unconfirmed_trucks（仍基于原 confirmed_trucks），再写 confirmed_trucks += truck_count，
@@ -190,22 +212,17 @@ def apply_adjust_confirmed_trucks(
 
 
 def refresh_delivery_plan_status_if_full(cur, plan_no: str) -> None:
-    """已定车数达到或超过计划车数时，将仍为「生效中」的报货计划自动标记为「已失效」。"""
-    cur.execute(
-        """
-        UPDATE pd_delivery_plans
-        SET plan_status = '已失效'
-        WHERE plan_no = %s
-          AND plan_status = '生效中'
-          AND planned_trucks > 0
-          AND confirmed_trucks >= planned_trucks
-        """,
-        (plan_no,),
-    )
+    """
+    历史行为：已定车数 >= 计划车数时将 plan_status 置为「已失效」。
+    该行为会导致「订货/已定车数刚占满报货计划」时计划被误判为作废，合同上传无法使用该 plan_no。
+    满额仅通过 confirmed_trucks / unconfirmed_trucks 体现，不再修改 plan_status。
+    """
+    _ = (cur, plan_no)  # 保留参数签名供调用方不变
+    return
 
 
 def refresh_delivery_plan_status_if_room(cur, plan_no: str) -> None:
-    """已定车数低于计划车数时，将因满额自动标记的「已失效」恢复为「生效中」（与满额失效对称）。"""
+    """已定车数低于计划车数时，若计划仍为「已失效」，恢复为「生效中」（用于释放额度或订正历史误标数据）。"""
     cur.execute(
         """
         UPDATE pd_delivery_plans
