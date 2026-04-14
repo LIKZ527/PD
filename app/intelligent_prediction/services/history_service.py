@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 
@@ -31,6 +31,9 @@ logger = get_logger(__name__)
 
 # 送货日期：年-月-日 或 年/月/日（月日可一位数）；与 Excel 序列日互不冲突的数值范围
 _DATE_YMD_SEP = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:\s|$)")
+# 中文：2026年1月9日；或仅 1月9日（缺省年份取 UTC 当日年份）
+_DATE_CN_YMD = re.compile(r"^(\d{4})年(\d{1,2})月(\d{1,2})(?:日|号|號)?")
+_DATE_CN_MD = re.compile(r"^(\d{1,2})月(\d{1,2})(?:日|号|號)?")
 _EXCEL_SERIAL_MAX = 200_000  # 约到 2448 年，覆盖正常业务日期列
 
 
@@ -47,6 +50,9 @@ class HistoryService:
         ("重量", "weight"),
     )
     REQUIRED_COLUMNS_CANONICAL: dict[str, str] = dict(_IMPORT_COLUMN_PAIRS)
+    _HEADER_TO_EXCEL_COLUMN: ClassVar[dict[str, str]] = {
+        cn: chr(ord("A") + i) for i, (cn, _) in enumerate(_IMPORT_COLUMN_PAIRS)
+    }
 
     @classmethod
     def import_template_headers(cls) -> list[str]:
@@ -91,7 +97,10 @@ class HistoryService:
         ),
         "冶炼厂": "选填；填写时长度不超过 100 字符。",
         "仓库": "必填。",
-        "送货日期": "必填。支持 YYYY-MM-DD、YYYY/M/D；亦支持 Excel 日期或序列号。",
+        "送货日期": (
+            "必填。支持 YYYY-MM-DD、YYYY/M/D、YYYY年M月D日、M月D日（缺省年为当年 UTC）；"
+            "亦支持 Excel 日期或序列号。"
+        ),
         "品种": "必填。",
         "重量": "必填；非负数字，可含小数。",
     }
@@ -141,7 +150,8 @@ class HistoryService:
             "·「使用说明」：仅供阅读，导入时不会解析本页。\n\n"
             "二、字段与格式\n"
             "·大区经理、仓库、品种、重量、送货日期为必填；冶炼厂选填。\n"
-            "·送货日期：可用 2026-01-15、2026/1/15 等；亦支持 Excel 原生日期单元格或日期序列号。\n"
+            "·送货日期：可用 2026-01-15、2026/1/15、2026年1月15日、1月15日（缺省年为当年 UTC）等；"
+            "亦支持 Excel 原生日期单元格或日期序列号。\n"
             "·重量：非负数字，可含小数。\n\n"
             "三、示例行\n"
             "·「导入数据」表中第 2 行起为示例（大区经理以「(示例)」开头）。导入接口会自动跳过这些行并计入 skipped；您也可在导入前自行删除。\n\n"
@@ -211,11 +221,61 @@ class HistoryService:
                 return date(y, mo, da), None
             except ValueError:
                 return None, f"invalid_calendar_date:{s[:80]}"
+        m_cn = _DATE_CN_YMD.match(head)
+        if m_cn:
+            y, mo, da = int(m_cn.group(1)), int(m_cn.group(2)), int(m_cn.group(3))
+            try:
+                return date(y, mo, da), None
+            except ValueError:
+                return None, f"invalid_calendar_date:{s[:80]}"
+        m_md = _DATE_CN_MD.match(head)
+        if m_md:
+            mo, da = int(m_md.group(1)), int(m_md.group(2))
+            y = datetime.now(timezone.utc).year
+            try:
+                return date(y, mo, da), None
+            except ValueError:
+                return None, f"invalid_calendar_date:{s[:80]}"
         parsed = pd.to_datetime(s, errors="coerce", dayfirst=False)
         if pd.isna(parsed):
             return None, f"unrecognized_date:{s[:80]}"
         ts = parsed.to_pydatetime()
         return ts.date(), None
+
+    @staticmethod
+    def _explain_date_error(code: str) -> str:
+        if code == "empty_date":
+            return "为空或无法识别为日期"
+        if code.startswith("invalid_calendar_date:"):
+            return f"日期在日历上不存在：{code.split(':', 1)[1]}"
+        if code.startswith("unrecognized_date:"):
+            return f"无法识别：{code.split(':', 1)[1]}"
+        return code
+
+    @staticmethod
+    def _explain_weight_error(code: str) -> str:
+        if code == "empty_weight":
+            return "为空或非数字"
+        if code.startswith("non_numeric_weight:"):
+            return f"无法解析为数字：{code.split(':', 1)[1]}"
+        return code
+
+    def _append_import_cell_error(
+        self,
+        errors: list[HistoryImportRowError],
+        excel_row: int,
+        column_header: str,
+        message: str,
+    ) -> None:
+        errors.append(
+            HistoryImportRowError(
+                row_index=excel_row,
+                excel_column=self._HEADER_TO_EXCEL_COLUMN.get(column_header),
+                column_header=column_header,
+                field=self.REQUIRED_COLUMNS_CANONICAL.get(column_header),
+                message=message,
+            )
+        )
 
     def _parse_weight_cell(self, value: Any) -> tuple[Decimal | None, str | None]:
         if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -324,37 +384,43 @@ class HistoryService:
                 skipped += 1
                 continue
 
-            row_errors: list[str] = []
+            row_has_error = False
             if rm is None or str(rm).strip() == "":
-                row_errors.append("大区经理必填")
+                self._append_import_cell_error(errors, excel_row, "大区经理", "必填")
+                row_has_error = True
             if wh is None or str(wh).strip() == "":
-                row_errors.append("仓库必填")
+                self._append_import_cell_error(errors, excel_row, "仓库", "必填")
+                row_has_error = True
             if variety is None or str(variety).strip() == "":
-                row_errors.append("品种必填")
+                self._append_import_cell_error(errors, excel_row, "品种", "必填")
+                row_has_error = True
             sm_str: str | None = None
             if sm is not None and str(sm).strip() != "":
                 sm_str = str(sm).strip()
                 if len(sm_str) > 100:
-                    row_errors.append("冶炼厂长度不可超过100字符")
+                    self._append_import_cell_error(
+                        errors, excel_row, "冶炼厂", "长度不可超过 100 字符"
+                    )
+                    row_has_error = True
 
             d, de = self._parse_date_cell(dv)
             if de:
-                row_errors.append(f"日期:{de}")
+                self._append_import_cell_error(
+                    errors, excel_row, "送货日期", self._explain_date_error(de)
+                )
+                row_has_error = True
 
             w, we = self._parse_weight_cell(wv)
             if we:
-                row_errors.append(f"重量:{we}")
-            if w is not None and w < 0:
-                row_errors.append("重量不可为负")
-
-            if row_errors:
-                errors.append(
-                    HistoryImportRowError(
-                        row_index=excel_row,
-                        field="row",
-                        message="; ".join(row_errors),
-                    )
+                self._append_import_cell_error(
+                    errors, excel_row, "重量", self._explain_weight_error(we)
                 )
+                row_has_error = True
+            if w is not None and w < 0:
+                self._append_import_cell_error(errors, excel_row, "重量", "不可为负")
+                row_has_error = True
+
+            if row_has_error:
                 continue
 
             assert d is not None and w is not None

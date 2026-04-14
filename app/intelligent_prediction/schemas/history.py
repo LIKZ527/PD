@@ -36,9 +36,23 @@ class HistoryListResponse(BaseModel):
 class HistoryImportRowError(BaseModel):
     """导入错误行信息。"""
 
-    row_index: int = Field(..., description="Excel 行号（1-based，含表头则为数据行）")
-    field: Optional[str] = None
-    message: str
+    row_index: int = Field(
+        ...,
+        description="Excel 行号（1-based；第 1 行为表头，数据从第 2 行起）",
+    )
+    excel_column: Optional[str] = Field(
+        None,
+        description="与导入模板一致的列字母（如 A、D），便于在表格中定位",
+    )
+    column_header: Optional[str] = Field(
+        None,
+        description="表头中文列名（与模板一致），与 excel_column 对应",
+    )
+    field: Optional[str] = Field(
+        None,
+        description="内部字段名（如 regional_manager），可选；新错误以 excel_column 为准",
+    )
+    message: str = Field(..., description="该列/单元格的具体错误说明")
 
 
 class HistoryImportResponse(BaseModel):

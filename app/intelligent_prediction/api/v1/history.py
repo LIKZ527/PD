@@ -121,7 +121,10 @@ async def download_history_template_csv() -> StreamingResponse:
     "/导入",
     response_model=HistoryImportResponse,
     summary="导入送货历史 Excel",
-    description="上传 xlsx，校验后批量写入送货历史表。",
+    description=(
+        "上传 xlsx/csv，校验后批量写入送货历史表。"
+        "校验失败时返回 details.errors：每项含 Excel 行号 row_index、列字母 excel_column、表头 column_header 与 message。"
+    ),
 )
 @router.post("/import", response_model=HistoryImportResponse)
 async def import_history_excel(

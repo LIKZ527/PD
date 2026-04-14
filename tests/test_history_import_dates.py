@@ -1,13 +1,15 @@
 """送货历史导入：日期解析（-、/、Excel 序列日）与模板。"""
 
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from io import BytesIO
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
 from openpyxl import load_workbook
 
+import app.intelligent_prediction.services.history_service as history_service_mod
 from app.intelligent_prediction.services.history_service import HistoryService
 
 
@@ -26,6 +28,28 @@ def test_parse_iso_slash(svc: HistoryService) -> None:
     d, err = svc._parse_date_cell("2026/1/5")
     assert err is None
     assert d == date(2026, 1, 5)
+
+
+def test_parse_cn_full_year_month_day(svc: HistoryService) -> None:
+    d, err = svc._parse_date_cell("2026年1月9日")
+    assert err is None
+    assert d == date(2026, 1, 9)
+
+
+def test_parse_cn_month_day_uses_utc_year(svc: HistoryService) -> None:
+    fixed_now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    with patch.object(history_service_mod.datetime, "now", return_value=fixed_now):
+        d, err = svc._parse_date_cell("1月9日")
+    assert err is None
+    assert d == date(2026, 1, 9)
+
+
+def test_parse_cn_month_day_hao_variant(svc: HistoryService) -> None:
+    fixed_now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    with patch.object(history_service_mod.datetime, "now", return_value=fixed_now):
+        d, err = svc._parse_date_cell("12月31号")
+    assert err is None
+    assert d == date(2026, 12, 31)
 
 
 def test_parse_with_time(svc: HistoryService) -> None:
